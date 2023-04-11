@@ -1,0 +1,4 @@
+name: 'qm9'            # qm9, qm9_positional
+datadir: 'data/PascalVOC/'
+random_subset: null
+pin_memory: False
