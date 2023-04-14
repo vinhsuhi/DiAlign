@@ -1,4 +1,6 @@
-name: 'qm9'            # qm9, qm9_positional
-datadir: 'data/PascalVOC/'
+name: 'pascalvoc'            # qm9, qm9_positional
+datadir: '/home/ac141281/data/PascalVOC'
 random_subset: null
 pin_memory: False
+ori_dim: 1024
+test_limit: 1000 

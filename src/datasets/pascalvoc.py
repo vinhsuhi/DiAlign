@@ -113,16 +113,12 @@ class PascalVOCModule(pl.LightningDataModule):
         
         self.pre_filter = lambda data: data.pos.size(0) > 0
         self.pre_setup()
+        self.setup()
 
     def pre_setup(self):
         self.pascal_test_ = list()
-        for category in PascalVOC.categories:
-            dataset = PascalVOC(self.data_dir, category, train=False, transform=self.transform, pre_filter=self.pre_filter)
-            self.pascal_test_ += [PairDataset(dataset, dataset, sample=True)]
         
-
-
-    def setup(self, stage: str):
+    def setup(self):
         self.pascalvoc_train = list() 
         self.pascalvoc_val = list()
 
@@ -131,8 +127,12 @@ class PascalVOCModule(pl.LightningDataModule):
         for category in PascalVOC.categories:
             dataset = PascalVOC(path, category, train=True, transform=self.transform, pre_filter=self.pre_filter)
             self.pascalvoc_train += [PairDataset(dataset, dataset, sample=True)]
+            dataset = PascalVOC(self.data_dir, category, train=False, transform=self.transform, pre_filter=self.pre_filter)
+            self.pascal_test_ += [PairDataset(dataset, dataset, sample=True)]
             # dataset = PascalVOC(path, category, train=False, transform=self.transform, pre_filter=self.pre_filter)
             # self.pascalvoc_test_ += [PairDataset(dataset, dataset, sample=True)]
+
+        self.pascal_test_ = [DataLoader(dataset, self.batch_size, shuffle=False, follow_batch=['x_s', 'x_t']) for dataset in self.pascal_test_]
 
         self.pascalvoc_train = torch.utils.data.ConcatDataset(self.pascalvoc_train)
         self.pascalvoc_test = torch.utils.data.ConcatDataset(self.pascal_test_)

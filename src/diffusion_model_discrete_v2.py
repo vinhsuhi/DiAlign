@@ -11,6 +11,7 @@ from models.transformer_model import GraphTransformerMatching
 from diffusion.noise_schedule import DiscreteUniformTransitionAlign, PredefinedNoiseScheduleDiscrete
 from src.diffusion import diffusion_utils
 from src import utils
+from src.metrics.align_metrics import AlignAcc
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.data import DataLoader
 from torch_geometric.datasets import PascalVOCKeypoints as PascalVOC
@@ -36,8 +37,14 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if cfg.model.transition == 'uniform':
             self.transition_model = DiscreteUniformTransitionAlign()
 
-        self.test_data = test_data
+        # log hyperparameters
         self.save_hyperparameters()
+
+        self.train_acc = AlignAcc()
+        self.val_acc = AlignAcc()
+        self.test_acc = AlignAcc()
+
+        self.test_data = test_data
         self.start_epoch_time = None
         self.train_iterations = None
         self.val_iterations = None
@@ -45,6 +52,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.number_chain_steps = cfg.general.number_chain_steps
         self.best_val_nll = 1e8
         self.val_counter = 0
+        self.first = True
 
 
     def train_loss(self, S, y, reduction='mean'):
@@ -60,12 +68,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return nll if reduction == 'none' else getattr(torch, reduction)(nll)
 
 
-    def sub_forward(self, data):
-        x_s, x_t = data.x_s, data.x_t
-        edge_index_s, edge_index_t = data.edge_index_s, data.edge_index_t
-        edge_attr_s, edge_attr_t = data.edge_attr_s, data.edge_attr_t 
-        name_s, name_t = data.name_s, data.name_t
-        batch_s, batch_t = data.x_s_batch, data.x_t_batch
+    def sub_forward(self, batch):
+        x_s, x_t = batch.x_s, batch.x_t
+        edge_index_s, edge_index_t = batch.edge_index_s, batch.edge_index_t
+        edge_attr_s, edge_attr_t = batch.edge_attr_s, batch.edge_attr_t 
+        name_s, name_t = batch.name_s, batch.name_t
+        batch_s, batch_t = batch.x_s_batch, batch.x_t_batch
 
         x_s_, s_mask = to_dense_batch(x_s, batch_s, fill_value=0)
         x_t_, t_mask = to_dense_batch(x_t, batch_t, fill_value=0)
@@ -81,21 +89,20 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         
         batch_num_nodes = list()
         for j in range(batch_size):
-            this_y = generate_y(data[j].y, device=x_s.device)
+            this_y = generate_y(batch[j].y, device=x_s.device)
             align_matrix[j][this_y[0], this_y[1]] = 1.
-            batch_num_nodes.append(len(data[j].x_t))
+            batch_num_nodes.append(len(batch[j].x_t))
 
         return x_s, x_t, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, s_mask, t_mask, graph_s_data, graph_t_data
 
 
-    def training_step(self, data, i):
-        # self.eval()
-        # self.validation_step(data, i)
-        x_s, x_t, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, s_mask, t_mask, graph_s_data, graph_t_data = self.sub_forward(data)
+    def training_step(self, batch, batch_idx):
+        x_s, x_t, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, s_mask, t_mask, graph_s_data, graph_t_data = self.sub_forward(batch)
         noisy_data = self.apply_noise(align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, s_mask, x_s.device)
         pred = self.forward(noisy_data, s_mask, t_mask, graph_s_data, graph_t_data)
-        loss = self.train_loss(pred, generate_y(data.y, device=x_s.device))
-        print(loss)
+        target = generate_y(batch.y, device=x_s.device)
+        loss = self.train_loss(pred, target)
+        self.log('train/loss', loss, on_epoch=True)
         return {'loss': loss}
 
 
@@ -103,16 +110,20 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return torch.optim.AdamW(self.parameters(), lr=self.cfg.train.lr, amsgrad=True,
                                  weight_decay=self.cfg.train.weight_decay)
 
-    def on_fit_start(self) -> None:
-        self.train_iterations = len(self.trainer.datamodule.train_dataloader())
+    # def on_fit_start(self) -> None:
+    #     self.train_iterations = len(self.trainer.datamodule.train_dataloader())
 
 
     def to_test(self, data_cate):
+        '''
+        data_cate is a Dataloader instance 
+        '''
         correct = num_examples = 0
 
         loader = DataLoader(data_cate, self.cfg.train.batch_size, shuffle=False, follow_batch=['x_s', 'x_t'])
         correct = num_examples = 0
         while (num_examples < 1000):
+            
             for dt in loader:
                 dt = dt.to(self.device)
                 y = generate_y(dt.y, self.device)
@@ -123,43 +134,34 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 if num_examples > 1000:
                     return correct / num_examples
     
-    def acc(self, S, y, reduction='mean'):
-        r"""Computes the accuracy of correspondence predictions.
-        Args:
-            S (Tensor): Sparse or dense correspondence matrix of shape
-                :obj:`[batch_size * num_nodes, num_nodes]`.
-            y (LongTensor): Ground-truth matchings of shape
-                :obj:`[2, num_ground_truths]`.
-            reduction (string, optional): Specifies the reduction to apply to
-                the output: :obj:`'mean'|'sum'`. (default: :obj:`'mean'`)
-        """
-        assert reduction in ['mean', 'sum']
-        if not S.is_sparse:
-            pred = S[y[0]].argmax(dim=-1)
-        else:
-            assert S.__idx__ is not None and S.__val__ is not None
-            pred = S.__idx__[y[0], S.__val__[y[0]].argmax(dim=-1)]
 
-        correct = (pred == y[1]).sum().item()
-        return correct / y.size(1) if reduction == 'mean' else correct
+    def validation_step(self, batch, batch_idx, dataloader_idx):
+        category = PascalVOC.categories[dataloader_idx]
+        target = generate_y(batch.y, self.device)
+        sample, pred = self.sample_batch(batch)
+        print(self.val_acc.total)
+        test_acc = self.val_acc(pred, target)
+        self.log("test/acc_epoch/{}".format(category), test_acc)
 
-
-    def validation_step(self, data, i):
-        print('ahihi')
-        accs = [100 * self.to_test(data_cate) for data_cate in self.test_data]
-        accs += [sum(accs) / len(accs)]
-        print(' '.join([c[:5].ljust(5) for c in PascalVOC.categories] + ['mean']))
-        print(' '.join([f'{acc:.1f}'.ljust(5) for acc in accs]))
+        # accs = [100 * self.to_test(data_cate) for data_cate in self.test_data]
+        # accs += [sum(accs) / len(accs)]
+        # print(' '.join([c[:5].ljust(5) for c in PascalVOC.categories] + ['mean']))
+        # print(' '.join([f'{acc:.1f}'.ljust(5) for acc in accs]))
         
 
     def validation_epoch_end(self, outs) -> None:
+        
+        self.log("test/acc_epoch/mean", )
+        pass
+
+    def on_validation_epoch_start(self) -> None:
         pass
 
     def on_test_epoch_start(self) -> None:
         print("Starting test...")
 
     def test_step(self, data, i):
-        pass
+        self.validation_step(data, i)        
 
     def test_epoch_end(self, outs) -> None:
         pass
@@ -236,6 +238,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         z_T = sample_discrete_feature_noise()
         x = z_T
+        from tqdm import tqdm
         for s_int in tqdm(reversed(range(0, self.T))):
             s_array = s_int * torch.ones((batch_size,)).float()
             t_array = s_array + 1
@@ -309,6 +312,5 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             return X_t_
 
         sampled_s = sample_discrete_features(prob_X, node_mask=s_mask)
-
-        X_s = F.one_hot(sampled_s, num_classes=mask_align.shape[1]).float()
+        X_s = F.one_hot(sampled_s, num_classes=mask_align.shape[2]).float()
         return X_s

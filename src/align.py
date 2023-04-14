@@ -10,10 +10,11 @@ import warnings
 
 import torch
 import wandb
+from pytorch_lightning.loggers import WandbLogger
 import hydra
 import omegaconf
 from omegaconf import DictConfig
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities.warnings import PossibleUserWarning
 
@@ -22,7 +23,7 @@ from datasets import pascalvoc
 from diffusion_model import LiftedDenoisingDiffusion
 from diffusion_model_discrete_v2 import DiscreteDenoisingDiffusion
 
-
+seed_everything(42, workers=True)
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 
 
@@ -77,6 +78,8 @@ def setup_wandb(cfg):
 @hydra.main(version_base='1.1', config_path='../configs', config_name='config_align')
 def main(cfg: DictConfig):
 
+    wandb_logger = WandbLogger()
+
     datamodule = pascalvoc.PascalVOCModule(cfg)
     model_kwargs = {}
 
@@ -119,17 +122,17 @@ def main(cfg: DictConfig):
                       limit_train_batches=20 if name == 'test' else None,
                       limit_val_batches=20 if name == 'test' else None,
                       limit_test_batches=20 if name == 'test' else None,
-                      val_check_interval=cfg.general.val_check_interval,
                       max_epochs=cfg.train.n_epochs,
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       fast_dev_run=cfg.general.name == 'debug',
                       strategy='ddp' if cfg.general.gpus > 1 else None,
                       enable_progress_bar=cfg.train.progress_bar,
-                      callbacks=callbacks,
-                      logger=[])
+                      logger=wandb_logger,
+                      log_every_n_steps=cfg.train.log_every_n_steps,
+                      deterministic=False)
 
     if not cfg.general.test_only:
-        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume) # ckpt_path is None
+        trainer.fit(model, train_dataloaders=datamodule.train_dataloader(), val_dataloaders=datamodule.pascal_test_, ckpt_path=cfg.general.resume) # ckpt_path is None
         if cfg.general.name not in ['debug', 'test']:
             trainer.test(model, datamodule=datamodule)
     else:

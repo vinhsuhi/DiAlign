@@ -2,13 +2,13 @@
 name: 'graph-tf-model'      # Warning: 'debug' and 'test' are reserved name that have a special behavior
 
 wandb: 'disabled'             # online | offline | disabled
-gpus: 1                     # Multi-gpu is not implemented on this branch
+gpus: 1                   # Multi-gpu is not implemented on this branch
 
 
 resume: null            # If resume, path to ckpt file from outputs directory in main directory
 test_only: null         # Use absolute path
 
-check_val_every_n_epochs: 5
+check_val_every_n_epochs: 1
 sample_every_val: 4
 val_check_interval: null
 samples_to_generate: 512       # We advise to set it to 2 x batch_size maximum

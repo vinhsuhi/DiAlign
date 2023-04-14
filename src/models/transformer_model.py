@@ -339,10 +339,11 @@ class GraphTransformerMatching(nn.Module):
         what is the input?
         what is the output? - new alignment matrix
         """
+        device = s_mask.device
         if self.scalar_dim > 1:
-            time_emb = self.positional_encoding(noisy_data['t'])
+            time_emb = self.positional_encoding(noisy_data['t'].to(device))
         else:
-            time_emb = noisy_data['t'] # bs x 20
+            time_emb = noisy_data['t'].to(device) # bs x 20
         
         bnn_src = s_mask.sum(dim=1)
         bnn_trg = t_mask.sum(dim=1)
@@ -361,6 +362,7 @@ class GraphTransformerMatching(nn.Module):
 
         xs_src = [graph_s_data['x']]
         xs_trg = [graph_t_data['x']]
+
         for i in range(self.num_layers):
             x_input_src = self.linears[i](torch.cat((xs_src[-1], num_aligned_src, time_features_src), dim=-1))
             x_input_trg = self.linears[i](torch.cat((xs_trg[-1], num_aligned_trg, time_features_trg), dim=-1))
@@ -377,8 +379,13 @@ class GraphTransformerMatching(nn.Module):
             diff_src = diff_src_[s_mask]
             diff_trg = diff_trg_[t_mask]
 
-            xs_src += [torch.tanh(self.convs[i](torch.cat((x_input_src, diff_src), dim=-1), graph_s_data['edge_index'], graph_s_data['edge_attr']))]
-            xs_trg += [torch.tanh(self.convs[i](torch.cat((x_input_trg, diff_trg), dim=-1), graph_t_data['edge_index'], graph_t_data['edge_attr']))]
+            cat_src = torch.cat((x_input_src, diff_src), dim=-1) # gut
+            cat_trg = torch.cat((x_input_trg, diff_trg), dim=-1) # gut
+
+
+            xs_src += [torch.tanh(self.convs[i](cat_src, graph_s_data['edge_index'], graph_s_data['edge_attr']))]
+            xs_trg += [torch.tanh(self.convs[i](cat_trg, graph_t_data['edge_index'], graph_t_data['edge_attr']))]
+
 
         x_src = F.dropout(torch.cat(xs_src, dim=-1) if self.cat else xs_src[-1], p=self.dropout, training=self.training)
         x_trg = F.dropout(torch.cat(xs_trg, dim=-1) if self.cat else xs_trg[-1], p=self.dropout, training=self.training)
@@ -389,10 +396,9 @@ class GraphTransformerMatching(nn.Module):
         x_src_, _ = to_dense_batch(x_src, graph_s_data['batch'], fill_value=0)
         x_trg_, _ = to_dense_batch(x_trg, graph_t_data['batch'], fill_value=0)
 
-
-
         similarity_matrix = x_src_ @ x_trg_.transpose(-1, -2)
         similarity_matrix = masked_softmax(similarity_matrix, noisy_data['mask_align'])[s_mask]
+
         # TODO: consider random feature in the future!
         return similarity_matrix
     

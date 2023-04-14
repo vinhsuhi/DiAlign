@@ -1,6 +1,6 @@
 defaults:
-    - general : general_default
-    - model : discrete
+    - general : general_default_align
+    - model : discrete_align
     - train : train_default
     - dataset : pascalvoc
 
