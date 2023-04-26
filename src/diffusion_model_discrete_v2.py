@@ -15,22 +15,22 @@ from src.metrics.align_metrics import AlignAcc
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.data import DataLoader
 from torch_geometric.datasets import PascalVOCKeypoints as PascalVOC
-
+import networkx as nx 
+import matplotlib.pyplot as plt
 
 def generate_y(y_col, device):
     y_row = torch.arange(y_col.size(0), device=device)
     return torch.stack([y_row, y_col], dim=0)
 
 class DiscreteDenoisingDiffusion(pl.LightningModule):
-    def __init__(self, cfg, test_data=None):
+    def __init__(self, cfg):
         super().__init__()
-
         self.cfg = cfg
         self.name = cfg.general.name # graph-tf-model
         self.model_dtype = torch.float32
         self.T = cfg.model.diffusion_steps # 500
         self.model = GraphTransformerMatching(scalar_dim=cfg.model.scalar_dim, num_layers=cfg.model.num_layers, 
-                                              ori_feat_dim=cfg.dataset.ori_dim, embed_dim=cfg.model.embed_dim, cat=cfg.model.cat, lin=cfg.model.lin, dropout=cfg.model.dropout)
+                                              ori_feat_dim=cfg.dataset.ori_dim, embed_dim=cfg.model.embed_dim, cat=cfg.model.cat, lin=cfg.model.lin, dropout=cfg.model.dropout, use_time=cfg.model.use_time)
         self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
                                                               timesteps=cfg.model.diffusion_steps) # done
 
@@ -43,16 +43,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.train_acc = AlignAcc()
         self.val_acc = AlignAcc()
         self.test_acc = AlignAcc()
-
-        self.test_data = test_data
-        self.start_epoch_time = None
-        self.train_iterations = None
-        self.val_iterations = None
         self.log_every_steps = cfg.general.log_every_steps
-        self.number_chain_steps = cfg.general.number_chain_steps
-        self.best_val_nll = 1e8
-        self.val_counter = 0
-        self.first = True
+
+        self.train_samples_to_visual = None 
+        self.test_samples_to_visual = None
 
 
     def train_loss(self, S, y, reduction='mean'):
@@ -102,7 +96,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         pred = self.forward(noisy_data, s_mask, t_mask, graph_s_data, graph_t_data)
         target = generate_y(batch.y, device=x_s.device)
         loss = self.train_loss(pred, target)
-        self.log('train/loss', loss, on_epoch=True)
+        self.log('train/loss', loss, on_epoch=True, batch_size=target.shape[1])
         return {'loss': loss}
 
 
@@ -110,63 +104,182 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return torch.optim.AdamW(self.parameters(), lr=self.cfg.train.lr, amsgrad=True,
                                  weight_decay=self.cfg.train.weight_decay)
 
+
     # def on_fit_start(self) -> None:
     #     self.train_iterations = len(self.trainer.datamodule.train_dataloader())
-
-
-    def to_test(self, data_cate):
-        '''
-        data_cate is a Dataloader instance 
-        '''
-        correct = num_examples = 0
-
-        loader = DataLoader(data_cate, self.cfg.train.batch_size, shuffle=False, follow_batch=['x_s', 'x_t'])
-        correct = num_examples = 0
-        while (num_examples < 1000):
-            
-            for dt in loader:
-                dt = dt.to(self.device)
-                y = generate_y(dt.y, self.device)
-                sample, collapsed_sample = self.sample_batch(dt)
-                correct += self.acc(collapsed_sample, y, reduction='sum')
-                num_examples += y.size(1)
-
-                if num_examples > 1000:
-                    return correct / num_examples
-    
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         category = PascalVOC.categories[dataloader_idx]
         target = generate_y(batch.y, self.device)
+        node_batch_size = target.shape[1]
         sample, pred = self.sample_batch(batch)
-        print(self.val_acc.total)
         test_acc = self.val_acc(pred, target)
-        self.log("test/acc_epoch/{}".format(category), test_acc)
+        self.log("test/acc_epoch/{}".format(category), test_acc, batch_size=node_batch_size)
+        return {'test_acc': test_acc, 'bs': node_batch_size}
 
-        # accs = [100 * self.to_test(data_cate) for data_cate in self.test_data]
-        # accs += [sum(accs) / len(accs)]
-        # print(' '.join([c[:5].ljust(5) for c in PascalVOC.categories] + ['mean']))
-        # print(' '.join([f'{acc:.1f}'.ljust(5) for acc in accs]))
-        
-
-    def validation_epoch_end(self, outs) -> None:
-        
-        self.log("test/acc_epoch/mean", )
-        pass
+    def validation_epoch_end(self, outs):
+        accs = list()
+        for out_ in outs:
+            this_sum = 0
+            this_acc = 0
+            for out in out_:
+                acc, bs = out['test_acc'], out['bs']
+                this_sum += bs 
+                this_acc += acc * bs
+            accs.append(this_acc / this_sum)
+        acc = sum(accs) / len(accs)
+        self.log("test/acc_epoch/mean", acc)
+        print('Evaluation finished')
 
     def on_validation_epoch_start(self) -> None:
-        pass
+        self.val_acc.reset()
+        self.test_acc.reset()
+        print("Start evaluating after {} epochs...".format(self.current_epoch))
 
     def on_test_epoch_start(self) -> None:
+
+
+        print('Visualizing output...')
+
+        for batch in self.train_samples_to_visual:
+            batch = batch.to(self.device)
+            self.visualize_batch(batch, dtn='train')
+            break
+
+        for batch in self.test_samples_to_visual:
+            batch = batch.to(self.device)
+            self.visualize_batch(batch, dtn='test')
+            break
+
+        print('Done visualization!')
         print("Starting test...")
 
-    def test_step(self, data, i):
-        self.validation_step(data, i)        
+    def test_step(self, data, batch_idx, dataloader_idx):
+        return self.validation_step(data, batch_idx, dataloader_idx)        
 
     def test_epoch_end(self, outs) -> None:
-        pass
 
-    def apply_noise(self, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, node_mask, device):
+        print("Testing finished")
+        accs = list()
+        for out_ in outs:
+            this_sum = 0
+            this_acc = 0
+            for out in out_:
+                acc, bs = out['test_acc'], out['bs']
+                this_sum += bs 
+                this_acc += acc * bs
+            accs.append(this_acc / this_sum)
+        acc = sum(accs) / len(accs)
+        self.log("test/acc_epoch/MEAN", acc)
+        print('Evaluation finished')
+    
+    def visualize_batch(self, batch, dtn='train'):
+        """
+        TODO: Visualize forward
+        TODO: VIsualize reverse
+        """
+        _, _, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, node_mask, _, _, _ = self.sub_forward(batch)
+        poses, gts, edge_srcs, edge_trgs = self.forward_diffusion(align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, node_mask, batch, dtn=dtn)
+        self.reverse_diffusion(batch, poses, gts, edge_srcs, edge_trgs, node_mask, dtn=dtn)
+
+    
+
+    def visualise_instance(self, edge_src, edge_trg, gt, name, pos=None):
+        graph = nx.Graph()
+        graph.add_edges_from(edge_src.t().detach().cpu().numpy().tolist())
+        init_index_target = edge_src.max() + 1
+        target_edges = edge_trg + init_index_target
+        graph.add_edges_from(target_edges.t().detach().cpu().numpy().tolist())
+        gt_ = gt.clone()
+        gt_[1] += init_index_target
+        gt_ = gt_.t().detach().cpu().numpy().tolist()
+        graph.add_edges_from(gt_)
+
+        gt_dict = dict()
+        for i in range(len(gt_)):
+            gt_dict[gt_[i][0]] = gt_[i][1]
+
+        if pos is None:
+            pos = nx.spring_layout(graph)
+            for k, v in pos.items():
+                if k < init_index_target:
+                    try:
+                        pos[k][0] = pos[gt_dict[k]][0] - 2
+                        pos[k][1] = pos[gt_dict[k]][1] + 0.05
+                    except:
+                        pos[k][0] = pos[k][0] - 2
+
+        plt.figure(figsize=(4, 4))
+        options = {"edgecolors": "tab:gray", "node_size": 80, "alpha": 0.9}
+        nx.draw_networkx_nodes(graph, pos, nodelist=list(range(init_index_target)), node_color="tab:red", **options)
+        nx.draw_networkx_nodes(graph, pos, nodelist=list(range(init_index_target, len(pos))), node_color="tab:blue", **options)
+        nx.draw_networkx_edges(graph, pos)
+        nx.draw_networkx_edges(graph, pos, edgelist=gt_, width=3, alpha=0.5, edge_color="tab:green")
+        plt.tight_layout()
+        plt.savefig(name)
+        plt.close()
+        return pos
+    
+
+    def reverse_diffusion(self, batch, poses, gts, edge_srcs, edge_trgs, node_mask, dtn='train'):
+        device = self.device
+        trajectory = self.sample_batch(batch, return_traj=True)
+        for s_int in reversed(range(0, self.T + 1)):
+            align = trajectory[s_int]
+            print(align.shape)
+            for i in range(len(align)):
+                this_align = generate_y(align[i][node_mask[i]].argmax(dim=1), device)
+                path_visual = '/netscratch/duynguyen/Research/vinh/DiAlign/visuals/{}/sp{}/X_pred_{}.png'.format(dtn, i, self.T - s_int)
+                self.visualise_instance(edge_srcs[i], edge_trgs[i], this_align, path_visual, poses[i])
+
+
+    def forward_diffusion(self, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, node_mask, batch, dtn='train'):
+        device = self.device
+        # draw the first no-noise graph
+        gts = list()
+        edge_srcs = list()
+        edge_trgs = list()
+        poses = list()
+        for i in range(batch_size):
+            this_batch = batch[i]
+            edge_srcs.append(this_batch['edge_index_s'])
+            edge_trgs.append(this_batch['edge_index_t'])
+            gts.append(generate_y(this_batch.y, device))
+            path_visual = '/netscratch/duynguyen/Research/vinh/DiAlign/visuals/{}/sp{}/'.format(dtn, i)
+            if not os.path.exists(path_visual):
+                os.makedirs(path_visual)
+            poses.append(self.visualise_instance(edge_srcs[-1], edge_trgs[-1], gts[-1], '{}/X_0.png'.format(path_visual)))
+
+        for t_int in range(0, self.T):
+            noisy_sample = self.apply_noise(align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, node_mask, device, t_int=t_int)
+            noisy_alignment = noisy_sample['noise_align']
+            for i in range(batch_size):
+                this_noisy_alignment = generate_y(noisy_alignment[i][node_mask[i]].argmax(dim=1), device)
+                path_visual = '/netscratch/duynguyen/Research/vinh/DiAlign/visuals/{}/sp{}/X_{}.png'.format(dtn, i, t_int + 1)
+                self.visualise_instance(edge_srcs[i], edge_trgs[i], this_noisy_alignment, path_visual, poses[i])
+        return poses, gts, edge_srcs, edge_trgs
+
+
+    def sample_discrete_features_align(self, probX, node_mask):
+        ''' Sample features from multinomial distribution with given probabilities (probX, probE, proby)
+            :param probX: bs, n, dx_out        node features
+            :param proby: bs, dy_out           global features.
+        '''
+        bs, n, _ = probX.shape
+        # Noise X
+        # The masked rows should define probability distributions as well
+        probX[~node_mask] = 1 / probX.shape[-1]
+
+        # Flatten the probability tensor to sample with multinomial
+        probX = probX.reshape(bs * n, -1)       # (bs * n, dx_out)
+
+        # Sample X
+        X_t = probX.multinomial(1)                                  # (bs * n, 1)
+        X_t = X_t.reshape(bs, n)     # (bs, n)
+        return X_t
+
+
+    def apply_noise(self, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, node_mask, device, t_int=None):
         '''
         mask_transition: 64 x 19 x 19
         mask_align: 64 x 19 x 19
@@ -175,7 +288,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         '''
         batch_num_nodes = torch.LongTensor(batch_num_nodes).to(device).reshape(-1, 1) # 64 x 1
         lowest_t = 0 if self.training else 1
-        t_int = torch.randint(lowest_t, self.T + 1, size=(batch_size,), device=device)
+        if t_int is None:
+            t_int = torch.randint(lowest_t, self.T + 1, size=(batch_size,), device=device)
+        else:
+            t_int = torch.randint(t_int, t_int + 1, size=(batch_size,), device=device)
+
         s_int = t_int - 1
 
         t_float = t_int / self.T 
@@ -185,34 +302,18 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         alpha_s_bar = self.noise_schedule.get_alpha_bar(t_normalized=s_float) 
         alpha_t_bar = self.noise_schedule.get_alpha_bar(t_normalized=t_float) # this is okay!
 
+
         Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, batch_num_nodes, batch_size=batch_size, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
         # Compute transition probabilities
         probX = align_matrix @ Qtb  # (bs, n, dx_out)
 
-        def sample_discrete_features_align(probX, node_mask):
-            ''' Sample features from multinomial distribution with given probabilities (probX, probE, proby)
-                :param probX: bs, n, dx_out        node features
-                :param proby: bs, dy_out           global features.
-            '''
-            bs, n, _ = probX.shape
-            # Noise X
-            # The masked rows should define probability distributions as well
-            probX[~node_mask] = 1 / probX.shape[-1]
-
-            # Flatten the probability tensor to sample with multinomial
-            probX = probX.reshape(bs * n, -1)       # (bs * n, dx_out)
-
-            # Sample X
-            X_t = probX.multinomial(1)                                  # (bs * n, 1)
-            X_t = X_t.reshape(bs, n)     # (bs, n)
-            return X_t
-
-        sampled_t = sample_discrete_features_align(probX, node_mask)
+        sampled_t = self.sample_discrete_features_align(probX, node_mask)
 
         align_t = F.one_hot(sampled_t, num_classes=mask_transition.shape[1])
 
         noisy_data = {'t_int': t_int, 't': t_float, 'beta_t': beta_t, 'alpha_s_bar': alpha_s_bar,
                       'alpha_t_bar': alpha_t_bar, 'noise_align': align_t, 'mask_align': mask_align}
+
         return noisy_data
 
 
@@ -221,7 +322,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
 
     @torch.no_grad()
-    def sample_batch(self, data, number_chain_steps=50):
+    def sample_batch(self, data, return_traj=False):
         '''
         TODO: save trajectory and visualize
         '''
@@ -238,8 +339,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         z_T = sample_discrete_feature_noise()
         x = z_T
-        from tqdm import tqdm
-        for s_int in tqdm(reversed(range(0, self.T))):
+        trajectory = [x.clone()]
+        for s_int in reversed(range(0, self.T)):
             s_array = s_int * torch.ones((batch_size,)).float()
             t_array = s_array + 1
             s_norm = s_array / self.T 
@@ -247,6 +348,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
             sampled_s = self.sample_p_zs_given_zt(s_norm, t_norm, x, batch_num_nodes, mask_transition, mask_align, s_mask, t_mask, graph_s_data, graph_t_data)
             x = sampled_s
+            trajectory.append(sampled_s.clone())
+
+        if return_traj:
+            return trajectory
 
         collapsed_x = x[s_mask]
         return x, collapsed_x

@@ -22,6 +22,7 @@ from src import utils
 from datasets import pascalvoc
 from diffusion_model import LiftedDenoisingDiffusion
 from diffusion_model_discrete_v2 import DiscreteDenoisingDiffusion
+from diffusion_model_discrete_v3 import DiscreteDenoisingDiffusionv3
 
 seed_everything(42, workers=True)
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
@@ -32,7 +33,10 @@ def get_resume(cfg, model_kwargs):
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
-    model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
+    if cfg.model.type == 'discrete_align3':
+        model = DiscreteDenoisingDiffusionv3.load_from_checkpoint(resume, **model_kwargs)
+    else:
+        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
     cfg = model.cfg
     cfg.general.test_only = resume
     cfg.general.name = name
@@ -52,7 +56,7 @@ def get_resume_adaptive(cfg, model_kwargs):
     if cfg.model.type == 'discrete':
         model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
     else:
-        model = LiftedDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
+        model = DiscreteDenoisingDiffusionv3.load_from_checkpoint(resume_path, **model_kwargs)
     new_cfg = model.cfg
 
     for category in cfg:
@@ -65,20 +69,24 @@ def get_resume_adaptive(cfg, model_kwargs):
     new_cfg = cfg.update_config_with_new_keys(new_cfg, saved_cfg)
     return new_cfg, model
 
-
-def setup_wandb(cfg):
-    config_dict = omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
-    kwargs = {'name': cfg.general.name, 'project': f'graph_ddm_{cfg.dataset.name}', 'config': config_dict,
-              'settings': wandb.Settings(_disable_stats=True), 'reinit': True, 'mode': cfg.general.wandb}
-    wandb.init(**kwargs)
-    wandb.save('*.txt')
-    return cfg
-
-
 @hydra.main(version_base='1.1', config_path='../configs', config_name='config_align')
 def main(cfg: DictConfig):
+    '''
+    TODO: create some fixed data to visualize (done)
+    TODO: visualize them :D (doing!)
+    TODO: incorporate visualization to wandb
+    '''
 
-    wandb_logger = WandbLogger()
+    #A = torch.rand(100000, 500).cuda()
+
+    config = dict()
+    
+    this_setting = "t{}_{}_T{}_d{}_lr{:.4f}".format(cfg.model.use_time, cfg.model.scalar_dim, cfg.model.diffusion_steps, cfg.model.embed_dim, cfg.train.lr)    
+
+    if cfg.model.type == 'discrete_align3':
+        this_setting = 'wtr_' + this_setting
+
+    wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
 
     datamodule = pascalvoc.PascalVOCModule(cfg)
     model_kwargs = {}
@@ -92,18 +100,22 @@ def main(cfg: DictConfig):
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
 
-    utils.create_folders(cfg)
-    cfg = setup_wandb(cfg)
+    print(cfg)
 
-    model = DiscreteDenoisingDiffusion(cfg=cfg, test_data=datamodule.pascal_test_, **model_kwargs)
+    utils.create_folders(cfg)
+
+    if cfg.model.type == 'discrete_align3':
+        model = DiscreteDenoisingDiffusionv3(cfg=cfg, **model_kwargs)
+    else:
+        model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
-                                              monitor='val/epoch_NLL',
-                                              save_top_k=5,
-                                              mode='min',
+                                              monitor='test/acc_epoch/mean',
+                                              save_top_k=3,
+                                              mode='max',
                                               every_n_epochs=1)
         last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
         callbacks.append(last_ckpt_save)
@@ -115,42 +127,32 @@ def main(cfg: DictConfig):
     elif name == 'debug':
         print("[WARNING]: Run is called 'debug' -- it will run with fast_dev_run. ")
 
+
     # we can keep trainer
-    trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
+    trainer = Trainer(
+                      gradient_clip_val=cfg.train.clip_grad,
                       accelerator='gpu' if torch.cuda.is_available() and cfg.general.gpus > 0 else 'cpu',
                       devices=cfg.general.gpus if torch.cuda.is_available() and cfg.general.gpus > 0 else None,
-                      limit_train_batches=20 if name == 'test' else None,
-                      limit_val_batches=20 if name == 'test' else None,
-                      limit_test_batches=20 if name == 'test' else None,
                       max_epochs=cfg.train.n_epochs,
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
-                      fast_dev_run=cfg.general.name == 'debug',
                       strategy='ddp' if cfg.general.gpus > 1 else None,
                       enable_progress_bar=cfg.train.progress_bar,
                       logger=wandb_logger,
                       log_every_n_steps=cfg.train.log_every_n_steps,
+                      callbacks=callbacks,
                       deterministic=False)
+
+    VISUALIZE_SIZE=5
+    VISUALIZE_RANDOM=False
+
+    model.train_samples_to_visual = datamodule.visual_dataloader_train(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
+    model.test_samples_to_visual = datamodule.visual_dataloader_test(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
 
     if not cfg.general.test_only:
         trainer.fit(model, train_dataloaders=datamodule.train_dataloader(), val_dataloaders=datamodule.pascal_test_, ckpt_path=cfg.general.resume) # ckpt_path is None
-        if cfg.general.name not in ['debug', 'test']:
-            trainer.test(model, datamodule=datamodule)
+        trainer.test(model, dataloaders=datamodule.pascal_test_)
     else:
-        # Start by evaluating test_only_path
-        trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
-        if cfg.general.evaluate_all_checkpoints:
-            directory = pathlib.Path(cfg.general.test_only).parents[0]
-            print("Directory:", directory)
-            files_list = os.listdir(directory)
-            for file in files_list:
-                if '.ckpt' in file:
-                    ckpt_path = os.path.join(directory, file)
-                    if ckpt_path == cfg.general.test_only:
-                        continue
-                    print("Loading checkpoint", ckpt_path)
-                    setup_wandb(cfg)
-                    trainer.test(model, datamodule=datamodule, ckpt_path=ckpt_path)
-
+        trainer.test(model, dataloaders=datamodule.pascal_test_, ckpt_path=cfg.general.test_only)
 
 if __name__ == '__main__':
     main()

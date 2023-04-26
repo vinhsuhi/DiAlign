@@ -105,6 +105,7 @@ class PascalVOCModule(pl.LightningDataModule):
         super().__init__()
         self.data_dir = cfg.dataset.datadir
         self.batch_size = cfg.train.batch_size
+        self.batch_size_test = cfg.train.batch_size_test
         self.transform = T.Compose([
                         T.Delaunay(),
                         T.FaceToEdge(),
@@ -116,7 +117,7 @@ class PascalVOCModule(pl.LightningDataModule):
         self.setup()
 
     def pre_setup(self):
-        self.pascal_test_ = list()
+        self.pascal_test__ = list()
         
     def setup(self):
         self.pascalvoc_train = list() 
@@ -128,23 +129,30 @@ class PascalVOCModule(pl.LightningDataModule):
             dataset = PascalVOC(path, category, train=True, transform=self.transform, pre_filter=self.pre_filter)
             self.pascalvoc_train += [PairDataset(dataset, dataset, sample=True)]
             dataset = PascalVOC(self.data_dir, category, train=False, transform=self.transform, pre_filter=self.pre_filter)
-            self.pascal_test_ += [PairDataset(dataset, dataset, sample=True)]
+            self.pascal_test__ += [PairDataset(dataset, dataset, sample=True)]
             # dataset = PascalVOC(path, category, train=False, transform=self.transform, pre_filter=self.pre_filter)
             # self.pascalvoc_test_ += [PairDataset(dataset, dataset, sample=True)]
 
-        self.pascal_test_ = [DataLoader(dataset, self.batch_size, shuffle=False, follow_batch=['x_s', 'x_t']) for dataset in self.pascal_test_]
+        self.pascal_test_ = [DataLoader(dataset, self.batch_size_test, shuffle=False, follow_batch=['x_s', 'x_t']) for dataset in self.pascal_test__]
 
         self.pascalvoc_train = torch.utils.data.ConcatDataset(self.pascalvoc_train)
-        self.pascalvoc_test = torch.utils.data.ConcatDataset(self.pascal_test_)
+        self.pascalvoc_test = torch.utils.data.ConcatDataset(self.pascal_test__)
         self.pascalvoc_val = self.pascalvoc_test
+
+
+    def visual_dataloader_train(self, shuffle, size):
+        return DataLoader(self.pascalvoc_train, batch_size=size, shuffle=shuffle, follow_batch=['x_s', 'x_t'])
+        
+    def visual_dataloader_test(self, shuffle, size,):
+        return DataLoader(self.pascalvoc_test, batch_size=size, shuffle=shuffle, follow_batch=['x_s', 'x_t'])
 
     def train_dataloader(self):
         return DataLoader(self.pascalvoc_train, batch_size=self.batch_size, shuffle=True, follow_batch=['x_s', 'x_t'])
     
     def val_dataloader(self):
-        return DataLoader(self.pascalvoc_val, batch_size=self.batch_size, shuffle=False, follow_batch=['x_s', 'x_t'])
+        return DataLoader(self.pascalvoc_val, batch_size=self.batch_size_test, shuffle=False, follow_batch=['x_s', 'x_t'])
     
     def test_dataloader(self):
-        return DataLoader(self.pascalvoc_test, batch_size=self.batch_size, shuffle=False, follow_batch=['x_s', 'x_t'])
+        return DataLoader(self.pascalvoc_test, batch_size=self.batch_size_test, shuffle=False, follow_batch=['x_s', 'x_t'])
     
 

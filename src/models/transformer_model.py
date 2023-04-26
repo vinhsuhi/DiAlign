@@ -300,13 +300,13 @@ def masked_softmax(src, mask, dim=-1):
 
 
 class GraphTransformerMatching(nn.Module):
-    def __init__(self, scalar_dim=20, num_layers=3, ori_feat_dim=1024, embed_dim=128, cat=True, lin=True, dropout=0.0):
+    def __init__(self, scalar_dim=20, num_layers=3, ori_feat_dim=1024, embed_dim=128, cat=True, lin=True, dropout=0.0, use_time=True):
         super().__init__()
-        self.linear = nn.Linear(10, 10)
         self.positional_encoding = SinusoidalPosEmb(dim=scalar_dim)
         self.scalar_dim = scalar_dim
         self.num_layers = num_layers
         self.dropout = dropout
+        self.use_time = use_time
         self.linears = nn.ModuleList()
         self.linears.append(nn.Linear(ori_feat_dim + scalar_dim * 2, embed_dim))
         for _ in range(num_layers - 1):
@@ -342,9 +342,19 @@ class GraphTransformerMatching(nn.Module):
         device = s_mask.device
         if self.scalar_dim > 1:
             time_emb = self.positional_encoding(noisy_data['t'].to(device))
+
+            num_aligned_src = self.positional_encoding(noisy_data['noise_align'].sum(dim=-1)[s_mask] / 10)
+            num_aligned_trg = self.positional_encoding(noisy_data['noise_align'].transpose(1, 2).sum(dim=-1)[t_mask] / 10)
         else:
-            time_emb = noisy_data['t'].to(device) # bs x 20
-        
+            time_emb = noisy_data['t'].to(device).reshape(-1, 1) # bs x 20
+            num_aligned_src = noisy_data['noise_align'].sum(dim=-1)[s_mask] / 10
+            num_aligned_trg = noisy_data['noise_align'].transpose(1, 2).sum(dim=-1)[t_mask] / 10
+            num_aligned_src = num_aligned_src.reshape(-1, 1)
+            num_aligned_trg = num_aligned_trg.reshape(-1, 1)
+
+        if not self.use_time:
+            time_emb = time_emb * 0
+
         bnn_src = s_mask.sum(dim=1)
         bnn_trg = t_mask.sum(dim=1)
         # nhung features nao minh muon 
@@ -356,9 +366,6 @@ class GraphTransformerMatching(nn.Module):
 
         time_features_src = torch.cat(time_features_src, dim=0)
         time_features_trg = torch.cat(time_features_trg, dim=0)
-
-        num_aligned_src = self.positional_encoding(noisy_data['noise_align'].sum(dim=-1)[s_mask] / 10)
-        num_aligned_trg = self.positional_encoding(noisy_data['noise_align'].transpose(1, 2).sum(dim=-1)[t_mask] / 10)
 
         xs_src = [graph_s_data['x']]
         xs_trg = [graph_t_data['x']]
@@ -396,9 +403,10 @@ class GraphTransformerMatching(nn.Module):
         x_src_, _ = to_dense_batch(x_src, graph_s_data['batch'], fill_value=0)
         x_trg_, _ = to_dense_batch(x_trg, graph_t_data['batch'], fill_value=0)
 
+
+        # TODO: Is this a naive way of coputing similarity matrix?
         similarity_matrix = x_src_ @ x_trg_.transpose(-1, -2)
         similarity_matrix = masked_softmax(similarity_matrix, noisy_data['mask_align'])[s_mask]
 
-        # TODO: consider random feature in the future!
         return similarity_matrix
     

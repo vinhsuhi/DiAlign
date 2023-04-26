@@ -1,15 +1,13 @@
 # Model settings
-type: 'discrete_align'
+type: 'discrete_align3'
 transition: 'uniform'                          # uniform or marginal
 model: 'graph_tf'
 diffusion_steps: 50
 diffusion_noise_schedule: 'cosine'              # 'cosine', 'polynomial_2'
-
-extra_features: 'all'        # 'all', 'cycles', 'eigenvalues' or null
-
-scalar_dim: 20
-num_layers: 3
-embed_dim: 128
-cat: True 
+scalar_dim: 20 # rightnow it is a little bit problematic
+num_layers: 3 # should be 3
+embed_dim: 512 # should be 512
+cat: False # should be false
 lin: True
 dropout: 0.0
+use_time: True
