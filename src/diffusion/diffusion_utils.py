@@ -42,7 +42,7 @@ def clip_noise_schedule(alphas2, clip_value=0.001):
     return alphas2
 
 
-def cosine_beta_schedule(timesteps, s=0.008, raise_to_power: float = 1):
+def cosine_alpha_bar_schedule(timesteps, s=0.008, raise_to_power: float = 1):
     """
     cosine schedule
     as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
@@ -268,7 +268,8 @@ def sample_discrete_features(probX, probE, node_mask):
 
 def compute_posterior_distribution(M, M_t, Qt_M, Qsb_M, Qtb_M):
     ''' M: X or E
-        Compute xt @ Qt.T * x0 @ Qsb / x0 @ Qtb @ xt.T
+    
+        Compute xt @ Qt.T * x0 @ Qsb / x0 @ Qtb @ xt.T | q(x_{t-1} | x_t, x_0)
     '''
     # Flatten feature tensors
     M = M.flatten(start_dim=1, end_dim=-2).to(torch.float32)        # (bs, N, d) with N = n or n * n
@@ -319,6 +320,20 @@ def compute_batched_over0_posterior_distribution(X_t, Qt, Qsb, Qtb):
 
     out = numerator / denominator
     return out
+
+
+def mask_distributions_align(true_align, pred_align, s_mask):
+    pred_align = pred_align + 1e-7
+    pred_align = pred_align / pred_align.sum(dim=-1, keepdim=True)
+
+    # Set masked rows to arbitrary distributions, so it doesn't contribute to loss
+    row_align = torch.zeros(true_align.size(-1), dtype=torch.float, device=true_align.device) # num_target_nodes * 1
+    row_align[0] = 1.
+
+    true_align[~s_mask] = row_align
+    pred_align[~s_mask] = row_align
+
+    return true_align, pred_align
 
 
 def mask_distributions(true_X, true_E, pred_X, pred_E, node_mask):

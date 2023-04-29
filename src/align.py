@@ -20,9 +20,7 @@ from pytorch_lightning.utilities.warnings import PossibleUserWarning
 
 from src import utils
 from datasets import pascalvoc
-from diffusion_model import LiftedDenoisingDiffusion
-from diffusion_model_discrete_v2 import DiscreteDenoisingDiffusion
-from diffusion_model_discrete_v3 import DiscreteDenoisingDiffusionv3
+from diffusion_model_discrete import DiscreteDenoisingDiffusion
 
 seed_everything(42, workers=True)
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
@@ -33,10 +31,7 @@ def get_resume(cfg, model_kwargs):
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
-    if cfg.model.type == 'discrete_align3':
-        model = DiscreteDenoisingDiffusionv3.load_from_checkpoint(resume, **model_kwargs)
-    else:
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
+    model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
     cfg = model.cfg
     cfg.general.test_only = resume
     cfg.general.name = name
@@ -52,11 +47,7 @@ def get_resume_adaptive(cfg, model_kwargs):
     root_dir = current_path.split('outputs')[0]
 
     resume_path = os.path.join(root_dir, cfg.general.resume)
-
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
-    else:
-        model = DiscreteDenoisingDiffusionv3.load_from_checkpoint(resume_path, **model_kwargs)
+    model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
     new_cfg = model.cfg
 
     for category in cfg:
@@ -71,20 +62,15 @@ def get_resume_adaptive(cfg, model_kwargs):
 
 @hydra.main(version_base='1.1', config_path='../configs', config_name='config_align')
 def main(cfg: DictConfig):
-    '''
-    TODO: create some fixed data to visualize (done)
-    TODO: visualize them :D (doing!)
-    TODO: incorporate visualization to wandb
-    '''
-
-    #A = torch.rand(100000, 500).cuda()
-
     config = dict()
-    
-    this_setting = "t{}_{}_T{}_d{}_lr{:.4f}".format(cfg.model.use_time, cfg.model.scalar_dim, cfg.model.diffusion_steps, cfg.model.embed_dim, cfg.train.lr)    
 
-    if cfg.model.type == 'discrete_align3':
-        this_setting = 'wtr_' + this_setting
+    # TODO: change setting name    
+    this_setting = "t{}_T{}_{}_{}".format(cfg.model.use_time, cfg.model.diffusion_steps, cfg.model.loss_type, cfg.model.sample_mode)
+
+    if cfg.model.loss_type == 'hybrid' or cfg.model.loss_tpye == 'lvb_advance':
+        this_setting += '_ce{:.4f}_vb{:.4f}'.format(cfg.model.ce_weight, cfg.model.vb_weight)  
+
+    print(this_setting)
 
     wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
 
@@ -100,24 +86,19 @@ def main(cfg: DictConfig):
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
 
-    print(cfg)
+    #utils.create_folders(cfg)
 
-    utils.create_folders(cfg)
-
-    if cfg.model.type == 'discrete_align3':
-        model = DiscreteDenoisingDiffusionv3(cfg=cfg, **model_kwargs)
-    else:
-        model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
+    model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:
-        checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
+        checkpoint_callback = ModelCheckpoint(dirpath=f"/checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                               monitor='test/acc_epoch/mean',
                                               save_top_k=3,
                                               mode='max',
-                                              every_n_epochs=1)
-        last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
+                                              every_n_epochs=2)
+        last_ckpt_save = ModelCheckpoint(dirpath=f"/checkpoints/{cfg.general.name}", filename='last', every_n_epochs=2)
         callbacks.append(last_ckpt_save)
         callbacks.append(checkpoint_callback)
 
@@ -139,10 +120,12 @@ def main(cfg: DictConfig):
                       enable_progress_bar=cfg.train.progress_bar,
                       logger=wandb_logger,
                       log_every_n_steps=cfg.train.log_every_n_steps,
+                      fast_dev_run = cfg.general.name.lower() == 'debug',
                       callbacks=callbacks,
                       deterministic=False)
 
-    VISUALIZE_SIZE=5
+
+    VISUALIZE_SIZE=2
     VISUALIZE_RANDOM=False
 
     model.train_samples_to_visual = datamodule.visual_dataloader_train(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
@@ -153,6 +136,12 @@ def main(cfg: DictConfig):
         trainer.test(model, dataloaders=datamodule.pascal_test_)
     else:
         trainer.test(model, dataloaders=datamodule.pascal_test_, ckpt_path=cfg.general.test_only)
+
+    if cfg.general.remove_log:
+        import shutil
+        import os 
+        dir_path = os.path.dirname(os.path.realpath(__file__)).split('src')[0]
+        shutil.rmtree(dir_path)
 
 if __name__ == '__main__':
     main()

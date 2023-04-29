@@ -14,7 +14,7 @@ class PredefinedNoiseSchedule(torch.nn.Module):
         self.timesteps = timesteps
 
         if noise_schedule == 'cosine':
-            alphas2 = diffusion_utils.cosine_beta_schedule(timesteps)
+            alphas2 = diffusion_utils.cosine_alpha_bar_schedule(timesteps)
         elif noise_schedule == 'custom':
             raise NotImplementedError()
         else:
@@ -64,7 +64,7 @@ class PredefinedNoiseScheduleDiscrete(torch.nn.Module):
         log_alpha = torch.log(self.alphas)
         log_alpha_bar = torch.cumsum(log_alpha, dim=0)
         self.alphas_bar = torch.exp(log_alpha_bar)
-        # print(f"[Noise schedule: {noise_schedule}] alpha_bar:", self.alphas_bar)
+
 
     def forward(self, t_normalized=None, t_int=None):
         assert int(t_normalized is None) + int(t_int is None) == 1
@@ -77,8 +77,6 @@ class PredefinedNoiseScheduleDiscrete(torch.nn.Module):
         if t_int is None:
             t_int = torch.round(t_normalized * self.timesteps)
         return self.alphas_bar[t_int.long()]
-
-
 
 
 class DiscreteUniformTransition:
@@ -117,15 +115,14 @@ class DiscreteUniformTransition:
 
         return utils.PlaceHolder(X=q_x, E=q_e, y=q_y)
 
-    def get_Qt_bar(self, alpha_bar_t, device):
+    def get_Qtb(self, alpha_bar_t, device):
         """ Returns t-step transition matrices for X and E, from step 0 to step t.
-        Qt = prod(1 - beta_t) * I + (1 - prod(1 - beta_t)) / K
+        Qt_bar = alpha_bar_t * I + (1 - alpha_bar_t) / K
 
         alpha_bar_t: (bs)         Product of the (1 - beta_t) for each time step from 0 to t.
         returns: qx (bs, dx, dx), qe (bs, de, de), qy (bs, dy, dy).
         """
-        alpha_bar_t = alpha_bar_t.unsqueeze(1)
-        alpha_bar_t = alpha_bar_t.to(device)
+        alpha_bar_t = alpha_bar_t.unsqueeze(1).to(device)
         self.u_x = self.u_x.to(device)
         self.u_e = self.u_e.to(device)
         self.u_y = self.u_y.to(device)
@@ -151,34 +148,44 @@ class DiscreteUniformTransitionAlign:
 
         num_classes: = num_classes 
         """
-        # compute u_x here
+        # reshape beta_t
+        beta_t_ = beta_t.unsqueeze(1).unsqueeze(-1)
+        beta_t_ = beta_t_.to(device)
+
+        # compute 11T / K
         u_x = torch.ones(batch_size, num_classes.max().item(), num_classes.max().item())
         u_x = u_x.to(device)
         u_x = u_x / num_classes.unsqueeze(-1)
 
-        beta_t_ = beta_t.unsqueeze(1).unsqueeze(-1)
-        beta_t_ = beta_t_.to(device)
-        
-        q_x = beta_t_ * u_x + (1 - beta_t_) * torch.eye(num_classes.max().item(), device=device).repeat(batch_size, 1).reshape(batch_size, num_classes.max().item(), -1)
+        # define eye matrix
+        eye_matrix = torch.eye(num_classes.max().item(), device=device).repeat(batch_size, 1).reshape(batch_size, num_classes.max().item(), -1)
+
+        # compute Qt
+        q_x = (1 - beta_t_) * eye_matrix + beta_t_ * u_x
         return q_x
 
 
-    def get_Qt_bar(self, alpha_bar_t, num_classes, batch_size, device):
-        """ Returns t-step transition matrices for X and E, from step 0 to step t.
-        Qt = prod(1 - beta_t) * I + (1 - prod(1 - beta_t)) / K
+    def get_Qtb(self, alpha_bar_t, num_classes, batch_size, device):
+        """ Returns t-step transition matrices for align_data, from step 0 to step t.
+        Qt_bar = alpha_bar_t * I + (1 - alpha_bar_t) / K
 
         alpha_bar_t: (bs)         Product of the (1 - beta_t) for each time step from 0 to t.
-        returns: qx (bs, dx, dx), qe (bs, de, de), qy (bs, dy, dy).
+        returns: q_x (bs, dx, dx).
         """
-
-        u_x = torch.ones(batch_size, num_classes.max().item(), num_classes.max().item())
-        u_x = u_x.to(device)
-        u_x = u_x / num_classes.unsqueeze(-1)
-        
+        # reshape alpha_bar_t
         alpha_bar_t_ = alpha_bar_t.unsqueeze(1).unsqueeze(-1)
         alpha_bar_t_ = alpha_bar_t_.to(device)
 
-        q_x = alpha_bar_t_ * torch.eye(num_classes.max().item(), device=device).repeat(batch_size, 1).reshape(batch_size, num_classes.max().item(), -1) + (1 - alpha_bar_t_) * u_x
+        # compute 11T / K
+        u_x = torch.ones(batch_size, num_classes.max().item(), num_classes.max().item()) # (bs, M , M) 
+        u_x = u_x.to(device)
+        u_x = u_x / num_classes.unsqueeze(-1)
+        
+        # define eye matrix
+        eye_matrix = torch.eye(num_classes.max().item(), device=device).repeat(batch_size, 1).reshape(batch_size, num_classes.max().item(), -1)
+
+        # compute Qt_bar
+        q_x = alpha_bar_t_ * eye_matrix + (1 - alpha_bar_t_) * u_x
         return q_x
 
 
@@ -215,7 +222,7 @@ class MarginalUniformTransition:
 
         return utils.PlaceHolder(X=q_x, E=q_e, y=q_y)
 
-    def get_Qt_bar(self, alpha_bar_t, device):
+    def get_Qtb(self, alpha_bar_t, device):
         """ Returns t-step transition matrices for X and E, from step 0 to step t.
         Qt = prod(1 - beta_t) * I + (1 - prod(1 - beta_t)) * K
 
@@ -258,7 +265,7 @@ class AbsorbingStateTransition:
         q_y = beta_t * self.u_y + (1 - beta_t) * torch.eye(self.y_classes).unsqueeze(0)
         return q_x, q_e, q_y
 
-    def get_Qt_bar(self, alpha_bar_t):
+    def get_Qtb(self, alpha_bar_t):
         """ beta_t: (bs)
         Returns transition matrices for X and E"""
 
