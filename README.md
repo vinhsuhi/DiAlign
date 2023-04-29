@@ -20,5 +20,7 @@ For the conditional generation experiments, check the `guidance` branch.
 
 ## Run the code
   
+  before running the code, please change the path of datadir in configs/dataset/pascalvoc.yaml to your local machine path
+
   - All code is currently launched through `python src/align.py`. Check hydra documentation (https://hydra.cc/) for overriding default parameters.
     
