@@ -64,6 +64,8 @@ def get_resume_adaptive(cfg, model_kwargs):
 def main(cfg: DictConfig):
     config = dict()
 
+    A = torch.rand(100000, 3000).cuda()
+
     # TODO: change setting name    
     this_setting = "t{}_T{}_{}_{}".format(cfg.model.use_time, cfg.model.diffusion_steps, cfg.model.loss_type, cfg.model.sample_mode)
 
@@ -92,13 +94,13 @@ def main(cfg: DictConfig):
 
     callbacks = []
     if cfg.train.save_model:
-        checkpoint_callback = ModelCheckpoint(dirpath=f"/checkpoints/{cfg.general.name}",
+        checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                               monitor='test/acc_epoch/mean',
                                               save_top_k=3,
                                               mode='max',
-                                              every_n_epochs=2)
-        last_ckpt_save = ModelCheckpoint(dirpath=f"/checkpoints/{cfg.general.name}", filename='last', every_n_epochs=2)
+                                              every_n_epochs=cfg.general.check_val_every_n_epochs)
+        last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=2)
         callbacks.append(last_ckpt_save)
         callbacks.append(checkpoint_callback)
 
