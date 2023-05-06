@@ -1,4 +1,4 @@
-name: 'pascalvoc'            # qm9, qm9_positional
+name: 'PascalVOC'            # qm9, qm9_positional
 datadir: '/netscratch/duynguyen/Research/vinh/data/PascalVOC'
 random_subset: null
 pin_memory: False

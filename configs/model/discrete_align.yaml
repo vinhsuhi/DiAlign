@@ -17,3 +17,4 @@ sample_mode: 'wr' # 'wor' or 'wr'
 ce_weight: 0.001
 vb_weight: 1
 use_argmax: False # True or False
+metropolis: False

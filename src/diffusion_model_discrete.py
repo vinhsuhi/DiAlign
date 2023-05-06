@@ -18,6 +18,7 @@ from torch_geometric.datasets import PascalVOCKeypoints as PascalVOC
 import networkx as nx 
 import matplotlib.pyplot as plt
 import numpy as np 
+from scipy.optimize import linear_sum_assignment
 
 def generate_y(y_col, device):
     y_row = torch.arange(y_col.size(0), device=device)
@@ -334,8 +335,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         device = self.device
         # draw the first no-noise graph
 
-
-
         gts = list()
         edge_srcs = list()
         edge_trgs = list()
@@ -374,7 +373,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         # Sample X
         samples = list()
-        for i in range(len(q_probXt)):
+        for i in range(len(q_probXt)): # iterate over batch samples
             this_probX = q_probXt[i].clone()
             this_s_mask = s_mask[i]
             this_t_mask = t_mask[i]
@@ -407,27 +406,33 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return Xt
 
 
+
     def sample_by_greedy(self, q_probXt, s_mask, t_mask):
         bs, n, _ = q_probXt.shape 
 
         q_probXt[~s_mask] = 0
         samples = list() 
         for b in range(bs):
-            srcs = list()
-            trgs = list()
-            this_probXt = q_probXt[b]
-            for i in range(n):
-                argm = torch.argmax(this_probXt).item()
-                src = argm // this_probXt.shape[1]
-                trg = argm % this_probXt.shape[1]
-                srcs.append(src)
-                trgs.append(trg)
-                this_probXt[src] = 0
-                this_probXt[:, trg] = 0
-            srcs = torch.LongTensor(srcs).to(self.device)
-            trgs = torch.LongTensor(trgs).to(self.device)
-            samples.append(trgs[srcs.sort()[1]])
-        Xt = torch.stack(samples)
+            # srcs = list()
+            # trgs = list()
+            # this_probXt = q_probXt[b]
+            # for i in range(n):
+            #     argm = torch.argmax(this_probXt).item()
+            #     src = argm // this_probXt.shape[1]
+            #     trg = argm % this_probXt.shape[1]
+            #     srcs.append(src)
+            #     trgs.append(trg)
+            #     this_probXt[src] = 0
+            #     this_probXt[:, trg] = 0
+            # srcs = torch.LongTensor(srcs).to(self.device)
+            # trgs = torch.LongTensor(trgs).to(self.device)
+            # samples.append(trgs[srcs.sort()[1]])
+
+            this_probXt = q_probXt[b].detach().cpu().numpy() # cost matrix
+            srcs, trgs = linear_sum_assignment(1 - this_probXt)
+            samples.append(torch.LongTensor(trgs[srcs.sort()]).to(self.device))
+            #import pdb; pdb.set_trace()
+        Xt = torch.cat(samples, dim=0)
         return Xt    
         
 
@@ -529,6 +534,75 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return sample
 
 
+    def sample_discrete_features_align_metropolis(self, prob):
+        ''' Sample features from multinomial distribution (w/o replacement) with given probabilities
+            :param q_probXt: bs, n, dx_out        
+        '''
+        bs, n, _ = q_probXt.shape
+        # Noise X
+        # The masked rows should define probability distributions as well
+        #q_probXt[~s_mask] = 1 / q_probXt.shape[-1]
+        # Flatten the probability tensor to sample with multinomial
+        # Sample X
+        
+        n_episodes = 20
+        prob = probs[0].clone() # one instance from the batch
+        N = prob.shape[1] # N is the number of target nodes (which is greater or equal number of source nodes)
+        n = prob.shape[0] # n is the number of source nodes
+
+        # adding pseudo nodes to graph (so that we have equal N and n), and pseudo alignment prob!
+        padded_prob = torch.zeros(N, N)
+        padded_prob[:n,:] = prob
+        padded_prob[n:, :] += 1 / N # uniform transition probs for pseudo nodes
+
+        # initialize sigma, which is a random order of source nodes
+        sigma = torch.randperm(N).to(self.device)
+        # initialize pi
+        pi = torch.zeros(N).long().to(self.device)
+
+        for _ in range(n_episodes): # until converge
+            this_prob = padded_prob.clone()
+            # step 1
+            for i in range(N):
+                pi[i] = this_prob[sigma[i].item()].multinomial(1).item() # pi[i] = j
+                this_prob[:, trg_node] = 0 # mask the sampled one
+                # re-normalize the probability matrix
+                this_prob = (this_prob + 1e-12) / (this_prob + 1e-12).sum(dim=1, keepdim=True)
+            
+            this_prob = padded_prob.clone() # one instance from the batch
+            # step 2
+            prob_pi = this_prob[sigma, pi].prod()
+            prob_sigma = this_prob[torch.arange(N).to(self.device), sigma]
+
+            q_pi_given_sigma = torch.zeros(N).to(self.device) # initialize the prob
+            for i in range(N):
+                if i == 0:
+                    continue # there is no edges that have been taken
+                this_prob[:, pi[:i]] = 0
+                # re-normalize the remaining probs
+                this_prob = (this_prob + 1e-12) / (this_prob + 1e-12).sum(dim=1, keepdim=True)
+                # take the probability of pair (pi(i), sigma(i))
+                q_pi_given_sigma[i] = this_prob[pi[i], sigma[i]]
+            q_pi_given_sigma = q_pi_given_sigma.prod()
+            
+            q_sigma_given_pi = torch.zeros(N).to(self.device) # initialize the prob
+            for i in range(N):
+                if i == 0:
+                    continue # there is no edges that have been taken
+                this_prob[:, sigma[:i]] = 0
+                # re-normalize the remaining probs
+                this_prob = (this_prob + 1e-12) / (this_prob + 1e-12).sum(dim=1, keepdim=True)
+                # take the probability of pair (pi(i), sigma(i))
+                q_sigma_given_pi[i] = this_prob[sigma[i], pi[i]]
+            q_sigma_given_pi = q_sigma_given_pi.prod()
+            
+            # if Uniform(0,1) < p(π)·q(σ|π) / (p(σ)·q(π|σ))
+            if np.random.rand() < prob_pi * q_sigma_given_pi / (prob_sigma * q_pi_given_sigma):
+                # accept new sigma
+                sigma = pi[sigma]
+        return Xt
+
+
     def sample_discrete_feature_noise_wr(self, bs, mask_align, s_mask, t_mask, lim_dist):
         sample = lim_dist.flatten(end_dim=-2).multinomial(1).reshape(bs, -1)
         long_mask = s_mask.long()
@@ -569,6 +643,30 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         collapsed_X = X[s_mask]
         return X, collapsed_X
 
+    def sample_gumbel_noise(self, prob):
+        '''
+        prob: the posterior of size (n_src_nodes x n_trg_nodes)
+        '''
+        from torch.distributions.gumbel import Gumbel
+        log_prob = torch.log(prob)
+        # generate gumbel noise Gumbel(0, 1)
+        gumbel_distribution = Gumbel(loc=torch.tensor([0.0]), scale=torch.tensor([1.0]))
+        # sample N x N gumbel noise instances
+        gumbel_noises = gumbel_distribution.sample(log_prob.shape).to(self.device).squeeze()
+
+        # log(p) + e
+        combined_ = log_prob + gumbel_noises
+
+        # cost_matrix = - simi_matrix (or alignment matrix)
+        cost = -combined_
+        cost = cost.detach().cpu().numpy()
+
+        # run Hungarian algorithm
+        srcs, trgs = linear_sum_assignment(cost)
+
+        this_sample = trgs[srcs.sort()]
+        
+        return this_sample
 
     def sample_p_Xs_given_Xt(self, s, t, Xt, batch_num_nodes, 
                                 mask_transition, mask_align, s_mask, t_mask, graph_s_data, graph_t_data, s_int):
@@ -607,8 +705,23 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         p_probXs_givenXt = unnormalized_probX / torch.sum(unnormalized_probX, dim=-1, keepdim=True)  # bs, n, d_t-1
 
         assert ((p_probXs_givenXt.sum(dim=-1) - 1).abs() < 1e-4).all()
+        
 
-        if self.cfg.model.sample_mode == 'wor' and (s_int > 0 or not self.cfg.model.use_argmax):
+        if self.cfg.model.metropolis and (s_int > 0 or not self.cfg.model.use_argmax):
+            #sampled_s = self.sample_discrete_features_align_metropolis(p_probXs_givenXt, s_mask, t_mask) 
+            sampled_s = list()
+            for batch_idx in range(bs):
+                prob = p_probXs_givenXt[batch_idx].clone()
+                this_s_mask = s_mask[batch_idx]
+                this_t_mask = t_mask[batch_idx]
+                this_prob = prob[this_s_mask][:, this_t_mask]
+                this_sampled_s = self.sample_gumbel_noise(prob)[0]
+                num_src_to_pad = len(this_s_mask) - len(this_sampled_s)
+                if num_src_to_pad > 0:
+                    this_sampled_s = np.concatenate((this_sampled_s, np.zeros(num_src_to_pad)))
+                sampled_s.append(this_sampled_s)
+            sampled_s = torch.LongTensor(np.stack(sampled_s)).to(self.device)
+        elif self.cfg.model.sample_mode == 'wor' and (s_int > 0 or not self.cfg.model.use_argmax):
             sampled_s = self.sample_discrete_features_align_wor(p_probXs_givenXt, s_mask, t_mask) 
         elif self.cfg.model.sample_mode == 'wr' and (s_int > 0 or not self.cfg.model.use_argmax):
             sampled_s = self.sample_discrete_features_align_wr(p_probXs_givenXt, s_mask, t_mask) 
