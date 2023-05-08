@@ -129,7 +129,6 @@ class GraphTransformerMatching(nn.Module):
         x_src_, _ = to_dense_batch(x_src, graph_s_data['batch'], fill_value=0)
         x_trg_, _ = to_dense_batch(x_trg, graph_t_data['batch'], fill_value=0)
 
-
         # TODO: Is this a naive way of coputing similarity matrix?
         similarity_matrix = x_src_ @ x_trg_.transpose(-1, -2)
         similarity_matrix = masked_softmax(similarity_matrix, noisy_data['mask_align'])[s_mask]

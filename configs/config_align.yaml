@@ -3,7 +3,7 @@ defaults:
     - general : general_default_align
     - model : discrete_align
     - train : train_default
-    - dataset : pascalvoc
+    - dataset : data_config
 
 hydra:
     run:
