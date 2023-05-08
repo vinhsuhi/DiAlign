@@ -8,7 +8,7 @@ import os
 from tqdm import tqdm
 
 from models.transformer_model import GraphTransformerMatching
-from diffusion.noise_schedule import DiscreteUniformTransitionAlign, PredefinedNoiseScheduleDiscrete
+from diffusion.noise_schedule import DiscreteUniformTransitionAlign, PredefinedNoiseScheduleDiscrete, MarginalUniMatchingTransition
 from src.diffusion import diffusion_utils
 from src import utils
 from src.metrics.align_metrics import AlignAcc
@@ -42,8 +42,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
                                                               timesteps=cfg.model.diffusion_steps) # done
 
-        #if cfg.model.transition == 'uniform':
-        self.transition_model = DiscreteUniformTransitionAlign()
+        if cfg.model.transition == 'uniform':
+            self.transition_model = DiscreteUniformTransitionAlign()
+        elif cfg.model.transition == 'matching':
+            self.transition_model = MarginalUniMatchingTransition(max_num_classes = 400) # @Vinh: Please replace this `400` with the actual `max_num_classes`
+        else:
+            raise NotImplementedError()
 
         # log hyperparameters
         self.ce_weight = cfg.model.ce_weight
@@ -165,6 +169,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         Ts = self.T * ones
         alpha_tb = self.noise_schedule.get_alpha_bar(t_int=Ts)  # (bs, 1) okay this is correct!
         Qtb = self.transition_model.get_Qtb(alpha_tb, self.device) * mask_transition
+        Qtb[torch.isnan(Qtb)] = 0.1
 
         # Compute transition probabilities
         prob_align = gold_align @ Qtb  # (bs, n, dx_out) q(X_T)
@@ -476,11 +481,15 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         alpha_tb = self.noise_schedule.get_alpha_bar(t_normalized=t_float) # this is okay!
 
         Qtb = self.transition_model.get_Qtb(alpha_tb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
+        Qtb[torch.isnan(Qtb)] = 0.1
         # Compute transition probabilities
         q_probXt = X0 @ Qtb  # (bs, n, dx_out) # keep this
 
         if self.cfg.model.sample_mode == 'wr':
-            sampled_t = self.sample_discrete_features_align_wr(q_probXt, s_mask, t_mask)
+            try:
+                sampled_t = self.sample_discrete_features_align_wr(q_probXt, s_mask, t_mask)
+            except RuntimeError:
+                import pdb; pdb.set_trace()
         elif self.cfg.model.sample_mode == 'wor':
             sampled_t = self.sample_discrete_features_align_wor(q_probXt, s_mask, t_mask)
 
@@ -582,7 +591,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         Qtb = self.transition_model.get_Qtb(alpha_tb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
         Qsb = self.transition_model.get_Qtb(alpha_sb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
-        Qt = self.transition_model.get_Qt(beta_t, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
+        Qtb[torch.isnan(Qtb)] = 0.1
+        Qsb[torch.isnan(Qsb)] = 0.1
+        if isinstance(self.transition_model, MarginalUniMatchingTransition):
+            Qt = self.transition_model.get_Qt(beta_t, alpha_sb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
+        else:
+            Qt = self.transition_model.get_Qt(beta_t, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
 
 
         noisy_data = {'t': t, 'beta_t': beta_t, 'alpha_sb': alpha_sb,
@@ -664,7 +678,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         Xt = noisy_data['Xt']
         Qtb = self.transition_model.get_Qtb(alpha_tb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
         Qsb = self.transition_model.get_Qtb(alpha_sb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
-        Qt = self.transition_model.get_Qt(beta_t, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
+        Qtb[torch.isnan(Qtb)] = 0.1
+        Qsb[torch.isnan(Qsb)] = 0.1
+        if isinstance(self.transition_model, MarginalUniMatchingTransition):
+            Qt = self.transition_model.get_Qt(beta_t, alpha_sb, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
+        else:
+            Qt = self.transition_model.get_Qt(beta_t, batch_num_nodes, batch_size=bs, device=self.device) * mask_transition  # (bs, dx_in, dx_out), (bs, de_in, de_out)
 
         # q(x_{t-1} | x_t, x_0)
         posterior_true = diffusion_utils.compute_posterior_distribution(X0, Xt, Qt, Qsb, Qtb)
