@@ -121,10 +121,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        if self.current_epoch < 30:
-            return None
         category = self.val_names[dataloader_idx]
-        
         update_info = self.gen_inter_info(batch)
         s_mask = update_info['s_mask']
         X0 = batch['gt_perm_mat'][0]
@@ -136,8 +133,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
 
     def validation_epoch_end(self, outs):
-        if self.current_epoch < 30:
-            return None
         accs = list()
         for out_ in outs:
             this_sum = 0
