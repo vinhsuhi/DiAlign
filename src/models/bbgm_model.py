@@ -125,16 +125,13 @@ class Net(backbone.VGG16_bn):
         # ):
 
 
-    def forward(self, noisy_data, s_mask, t_mask, data, update_info, pad=False):
+    def forward(self, noisy_data, s_mask, data, update_info, pad=False):
         images = data['images']
         points = data['Ps']
         n_points = data['ns']
         graphs = data['edges']
         
-        bs = update_info['bs']
-        
         global_list = []
-        orig_graph_list = []
         processed_graphs = []
         for image, p, n_p, graph in zip(images, points, n_points, graphs):
             # extract feature
@@ -160,134 +157,15 @@ class Net(backbone.VGG16_bn):
         src_x_, _ = to_dense_batch(src_x, src_graph.batch, fill_value=0)
         trg_x_, _ = to_dense_batch(trg_x, trg_graph.batch, fill_value=0)
         
-        
-        '''
-        hat_{S} = S_emb + S_proposed * f(t)
-        '''
-        
-        # bs, n, d = src_x_.shape
-        # bs, m, d = trg_x_.shape
-        # exp_src_x = src_x_.unsqueeze(1).expand(bs, m, n, d)
-        # exp_trg_x = trg_x_.unsqueeze(2).expand(bs, m, n, d)
-        
-        # diff = exp_src_x - exp_trg_x
         S_emb = src_x_ @ trg_x_.transpose(-1, -2) # this is 
-        
         S_proposed = noisy_data['Xt']
         time_emb = self.positional_encoding(noisy_data['t'].to(S_emb.device)) # bs x 1
         time_scalar = self.time_linear2(self.act(self.time_linear1(time_emb)))
-        
-        S_hat = S_emb + S_proposed * torch.nn.functional.softplus(time_scalar).unsqueeze(-1)
-        
+        time_weight = torch.nn.functional.softplus(time_scalar)
+        S_hat = S_emb + S_proposed * time_weight.unsqueeze(-1)
         S_hat = masked_softmax(S_hat, update_info['mask_align'])
         
         if pad:
             return S_hat
         return S_hat[s_mask]
         
-        # initialize source colour
-        source_colour = None 
-        # colouring target nodes using source colour space and the transfer matrix 
-        
-        # import pdb; pdb.set_trace()
-        
-        
-        similarity_matrix = masked_softmax(similarity_matrix, update_info['mask_align'])[s_mask]
-        
-        return similarity_matrix
-        
-        # import pdb; pdb.set_trace()
-        
-        # import pdb; pdb.set_trace()
-        
-        
-        #import pdb; pdb.set_trace()
-        # concatenate global source and global target feature
-        # global_weights_list = [
-        #     torch.cat([global_src, global_tgt], axis=-1) for global_src, global_tgt in lexico_iter(global_list)
-        # ]
-        # global_weights_list = [normalize_over_channels(g) for g in global_weights_list]
-
-        # unary_costs_list = [
-        #     self.vertex_affinity([item.x for item in g_1], [item.x for item in g_2], global_weights)
-        #     for (g_1, g_2), global_weights in zip(lexico_iter(orig_graph_list), global_weights_list)
-        # ]
-        
-        # unary_costs_list = list()
-        # for (g_1, g_2), global_weights in zip(lexico_iter(orig_graph_list), global_weights_list):
-        #     first_xs = list()
-        #     second_xs = list()
-        #     for item in g_1:
-        #         print(item)
-        #         import pdb; pdb.set_trace()
-        #         first_xs.append(item)
-        #     for item in g_2:
-        #         second_xs.append(item)
-                
-        
-        
-        unary_costs_list = [torch.softmax(ele, dim=1) for ele in unary_costs_list[0]]  
-
-        # Similarities to costs
-        #unary_costs_list = [[-x for x in unary_costs] for unary_costs in unary_costs_list]
-        
-        return unary_costs_list
-
-
-        if self.training:
-            unary_costs_list = [
-                [
-                    x + 1.0*gt[:dim_src, :dim_tgt]  # Add margin with alpha = 1.0
-                    for x, gt, dim_src, dim_tgt in zip(unary_costs, perm_mat, ns_src, ns_tgt)
-                ]
-                for unary_costs, perm_mat, (ns_src, ns_tgt) in zip(unary_costs_list, perm_mats, lexico_iter(n_points))
-            ]
-
-        quadratic_costs_list = [
-            self.edge_affinity([item.edge_attr for item in g_1], [item.edge_attr for item in g_2], global_weights)
-            for (g_1, g_2), global_weights in zip(lexico_iter(orig_graph_list), global_weights_list)
-        ]
-
-        # Aimilarities to costs
-        quadratic_costs_list = [[-0.5 * x for x in quadratic_costs] for quadratic_costs in quadratic_costs_list]
-
-        # if cfg.BB_GM.solver_name == "lpmp":
-        #     all_edges = [[item.edge_index for item in graph] for graph in orig_graph_list]
-        #     gm_solvers = [
-        #         GraphMatchingModule(
-        #             all_left_edges,
-        #             all_right_edges,
-        #             ns_src,
-        #             ns_tgt,
-        #             cfg.BB_GM.lambda_val,
-        #             cfg.BB_GM.solver_params,
-        #         )
-        #         for (all_left_edges, all_right_edges), (ns_src, ns_tgt) in zip(
-        #             lexico_iter(all_edges), lexico_iter(n_points)
-        #         )
-        #     ]
-        #     matchings = [
-        #         gm_solver(unary_costs, quadratic_costs)
-        #         for gm_solver, unary_costs, quadratic_costs in zip(gm_solvers, unary_costs_list, quadratic_costs_list)
-        #     ]
-        # elif cfg.BB_GM.solver_name == "multigraph":
-        #     all_edges = [[item.edge_index for item in graph] for graph in orig_graph_list]
-        #     gm_solver = MultiGraphMatchingModule(
-        #         all_edges, n_points, cfg.BB_GM.lambda_val, cfg.BB_GM.solver_params)
-        #     matchings = gm_solver(unary_costs_list, quadratic_costs_list)
-        # else:
-        #     raise ValueError(f"Unknown solver {cfg.BB_GM.solver_name}")
-
-        # if visualize_flag:
-        #     easy_visualize(
-        #         orig_graph_list,
-        #         points,
-        #         n_points,
-        #         images,
-        #         unary_costs_list,
-        #         quadratic_costs_list,
-        #         matchings,
-        #         **visualization_params,
-        #     )
-
-        return None

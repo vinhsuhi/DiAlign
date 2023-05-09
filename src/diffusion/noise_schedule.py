@@ -176,6 +176,7 @@ class DiscreteUniformTransitionAlign:
 
         alpha_bar_t: (bs)         Product of the (1 - beta_t) for each time step from 0 to t.
         returns: q_x (bs, dx, dx).
+        num_classes: bs x 1
         """
         # reshape alpha_bar_t
         alpha_bar_t_ = alpha_bar_t.unsqueeze(1).unsqueeze(-1)
@@ -195,91 +196,97 @@ class DiscreteUniformTransitionAlign:
 
 
 class MarginalUniMatchingTransition:
-    def __init__(self, max_num_classes):
+    def __init__(self, max_num_classes, noise_level_resolution = 0.005):
         self.g_table = torch.zeros([max_num_classes + 1], dtype = torch.float64)
-        curr_denom = 0.0
         self.g_table[0] = 0
         self.g_table[1] = math.log(1e-6)
         self.g_table[2] = 0
         for n in range(3, max_num_classes + 1):
             g = self.logsubexp(
-                self.log_factorial(n) - curr_denom,
+                self.log_factorial(n),
                 torch.logaddexp(
                     torch.logsumexp(
-                        self.log_binomial_coefficients(n)[:-1] + self.g_table[torch.arange(n-1, 1, -1)], dim = 0),
+                        self.log_binomial_coefficients(n)[:-1] + self.g_table[torch.arange(n-1, 1, -1)], 
+                        dim = 0
+                    ),
                     torch.tensor(0)
                 ).item()
             )
-            if g > 1e300:
-                g -= 1e10
-                self.g_table -= 1e10
-                curr_denom += 1e10
             self.g_table[n] = g
 
     def get_Qt(self, beta_t, alpha_bar_t, num_classes, batch_size, device):
-        '''beta_t = beta_t.cpu()
+
+        beta_t = beta_t.cpu()
         alpha_bar_t = alpha_bar_t.cpu()
         num_classes = num_classes.cpu()
 
-        Qt1b = self.get_Qtb(alpha_bar_t - beta_t, num_classes, batch_size, device)
-        Qtb = self.get_Qtb(alpha_bar_t, num_classes, batch_size, device)
+        vd_t, vnd_t = self.get_Qtb(alpha_bar_t.clamp(min = 0.001, max = 0.999), num_classes, batch_size, device, get_v = True)
+        vd_t_1, vnd_t_1 = self.get_Qtb((alpha_bar_t / (1.0 - beta_t.cpu())).clamp(min = 0.001, max = 0.999), num_classes, batch_size, device, get_v = True)
 
-        Q = (torch.inverse(Qt1b) @ Qtb).to(device)
-        Q /= Q.sum(dim = 1, keepdim = True)
-
-        return Q'''
-
-        Q = self.get_Qtb(beta_t.clamp(min = 0.01, max = 0.99), num_classes, batch_size, device)
-
-        return Q
-
-    def get_Qtb(self, alpha_bar_t, num_classes, batch_size, device):
-
-        alpha_bar_t = alpha_bar_t.cpu()
-        num_classes = num_classes.cpu()
-
-        num_classes = num_classes.squeeze()
-
-        nmax = num_classes.max().item()
-
-        v1 = torch.log(1-alpha_bar_t) + self.g_lamda(num_classes-1, alpha_bar_t)
-
-        mask = torch.zeros([num_classes.size(0), nmax-1], dtype = torch.float64)
-        mask[:,:] = -torch.inf
-        for i in range(num_classes.size(0)):
-            mask[i,:num_classes[i]-1] = 0.0
-
-        v2 = torch.logsumexp(torch.stack([
-            torch.log(alpha_bar_t) + self.log_Ank(num_classes, i) + self.g_lamda(num_classes - i - 1, alpha_bar_t) for i in range(nmax - 1)
-        ], dim = 1) + mask, dim = 1)
-
-        diag_v = torch.exp(v1 - torch.logaddexp(v1, v2))
-        ndiag_v = torch.exp(v2 - torch.logaddexp(v1, v2)) / (num_classes - 1)
+        diag_v = ((vd_t - vnd_t_1) / (vd_t_1 - vnd_t_1)).clamp(min = 0.0001, max = 0.9999)
+        ndiag_v = (1.0 - diag_v) / (num_classes.squeeze(1) - 1)
 
         u_x = torch.ones(batch_size, num_classes.max().item(), num_classes.max().item()) # (bs, M , M) 
         u_x[:,:,:] = ndiag_v.unsqueeze(1).unsqueeze(2)
         for i in range(batch_size):
             u_x[i].diagonal().fill_(diag_v[i])
 
-        u_x /= u_x.sum(dim = 1, keepdim = True)
+        u_x[torch.isnan(u_x)] = 0.1
 
         return u_x.to(device)
 
-    def g_lamda(self, ns, alpha):
-        n = ns.max().item()
-        log_binomials = torch.cat([
-            torch.tensor([0], dtype = torch.float64),
-            self.log_binomial_coefficients(n),
-            torch.tensor([0], dtype = torch.float64)
-        ], dim = 0)
-        mask = torch.zeros([ns.size(0), n+1], dtype = torch.float64)
+    def get_Qtb(self, alpha_bar_t, num_classes, batch_size, device, get_v = False):
+
+        alpha_bar_t = alpha_bar_t.clamp(min = 0.001, max = 0.999).cpu()
+        num_classes = num_classes.cpu()
+
+        num_classes = num_classes.squeeze(1)
+
+        nmax = num_classes.max().item()
+
+        mask = torch.zeros([num_classes.size(0), nmax+1], dtype = torch.float64)
         mask[:,:] = -torch.inf
-        for i in range(ns.size(0)):
-            mask[i,:ns[i]+1] = 0.0
-        return torch.logsumexp(
-            self.g_table[torch.arange(n,-1,-1)].unsqueeze(0) + log_binomials.unsqueeze(0) + self.log_factors(alpha, n, 0, n) + mask, 
-            dim = 1
-        )
+        for i in range(num_classes.size(0)):
+            mask[i,2:num_classes[i]+1] = 0.0
+
+        nn = torch.stack([
+            self.g_table[i] + \
+            torch.log(alpha_bar_t) * (num_classes - i) + \
+            torch.log(1.0 - alpha_bar_t) * i for i in range(nmax + 1)
+        ], dim = 1)
+        nn[torch.isnan(nn)] = 0
+        v12 = torch.logsumexp(nn + mask, dim = 1)
+
+        mask = torch.zeros([num_classes.size(0), nmax], dtype = torch.float64)
+        mask[:,:] = -torch.inf
+        for i in range(num_classes.size(0)):
+            mask[i,2:num_classes[i]] = 0.0
+
+        nn = torch.stack([
+            self.g_table[i] + \
+            torch.log(alpha_bar_t) * (num_classes - i) + \
+            torch.log(1.0 - alpha_bar_t) * i for i in range(nmax)
+        ], dim = 1)
+        nn[torch.isnan(nn)] = 0
+        v1 = torch.logsumexp(nn + mask, dim = 1)
+
+        diag_v = torch.exp(v1 - v12)
+        diag_v[num_classes == 1] = 0.9999
+        ndiag_v = (1.0 - diag_v) / (num_classes - 1)
+
+        if get_v:
+            return diag_v, ndiag_v
+
+        u_x = torch.ones(batch_size, num_classes.max().item(), num_classes.max().item()) # (bs, M , M) 
+        u_x[:,:,:] = ndiag_v.unsqueeze(1).unsqueeze(2)
+        for i in range(batch_size):
+            u_x[i].diagonal().fill_(diag_v[i])
+
+        u_x[torch.isnan(u_x)] = 0.1
+
+        assert not torch.any(torch.isnan(u_x))
+
+        return u_x.to(device)
 
     @staticmethod
     def log_binomial_coefficients(n):
@@ -293,7 +300,6 @@ class MarginalUniMatchingTransition:
         torch.Tensor: A 1D tensor containing the logarithm of the binomial coefficients.
         """
         k = torch.arange(1, n, dtype=torch.float64)
-        log_n = torch.log(torch.tensor(n, dtype=torch.float64))
 
         # Compute the logarithm of the binomial coefficient using the log gamma function
         log_bc = math.lgamma(n+1) - torch.lgamma(k+1) - torch.lgamma(n-k+1)
@@ -431,9 +437,9 @@ if __name__ == "__main__":
 
     nt = MarginalUniMatchingTransition(100)
 
-    alpha_bar_t = torch.tensor([0.1, 0.3, 0.8])
-    beta_t = torch.tensor([0.01, 0.01, 0.01])
-    num_classes = torch.tensor([[6],[9],[20]])
+    alpha_bar_t = torch.tensor([0.8])
+    # beta_t = torch.tensor([0.01, 0.01, 0.01])
+    num_classes = torch.tensor([[4]])
 
-    print(nt.get_Qtb(alpha_bar_t, num_classes, 3, torch.device("cpu")))
-    print(nt.get_Qt(beta_t, alpha_bar_t, num_classes, 3, torch.device("cpu")))
+    print(nt.get_Qtb(alpha_bar_t, num_classes, 1, torch.device("cpu")))
+    # print(nt.get_Qt(beta_t, alpha_bar_t, num_classes, 3, torch.device("cpu")))

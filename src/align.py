@@ -95,7 +95,7 @@ def main(cfg: DictConfig):
     data_vals = list()
     for cls in classes:
         im_data_test = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=dataset_len['test'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
-        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=dataset_len['test'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=50, obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
         data_tests.append(get_dataloader(im_data_test, fix_seed=True, batch_size=batch_sizes['test']))
         data_tests[-1].dataset.set_num_graphs(2)
         data_tests[-1].dataset.set_cls(cls)
@@ -160,7 +160,7 @@ def main(cfg: DictConfig):
     print(this_setting)
     
     
-    wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
+    #wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
 
     # we can keep trainer
     trainer = Trainer(
@@ -170,7 +170,7 @@ def main(cfg: DictConfig):
                       max_epochs=cfg.train.n_epochs,
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       strategy='ddp' if cfg.general.gpus > 1 else None,
-                      enable_progress_bar=cfg.train.progress_bar, logger=wandb_logger,
+                      enable_progress_bar=cfg.train.progress_bar, #logger=wandb_logger,
                       log_every_n_steps=cfg.train.log_every_n_steps,
                       fast_dev_run = cfg.general.name.lower() == 'debug',
                       callbacks=callbacks,
