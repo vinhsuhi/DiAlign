@@ -5,9 +5,9 @@ import numpy as np
 import scipy.io as sio
 from PIL import Image
 
-from data.base_dataset import BaseDataset
-from utils.config import cfg
-from utils.utils import lexico_iter
+from src.datasets.base_dataset import BaseDataset
+from src.bbgm_utils.config import bbgm_cfg as cfg
+from src.bbgm_utils.utils import lexico_iter
 
 
 class WillowObject(BaseDataset):

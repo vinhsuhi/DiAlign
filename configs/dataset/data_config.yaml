@@ -3,3 +3,6 @@ datadir: '/netscratch/duynguyen/Research/vinh/data/PascalVOC'
 random_subset: null
 pin_memory: False
 ori_dim: 1024
+train_sampling: 'superset'
+eval_sampling: 'superset'
+exclude_willow_classes: False

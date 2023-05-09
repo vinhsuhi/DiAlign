@@ -6,7 +6,7 @@ diffusion_steps: 50
 diffusion_noise_schedule: 'cosine'              # 'cosine', 'polynomial_2'
 scalar_dim: 20 # rightnow it is a little bit problematic
 num_layers: 3 # should be 3
-embed_dim: 512 # should be 512
+embed_dim: 64 # should be 512
 num_visual: 8
 cat: False # should be false
 lin: True
@@ -14,7 +14,7 @@ dropout: 0.0
 use_time: True
 loss_type: 'hybrid' # 'hybrid', 'lvb_advance', or 'ce'
 sample_mode: 'wr' # 'wor' or 'wr'
-ce_weight: 0.001
+ce_weight: 0.01
 vb_weight: 1
-use_argmax: False # True or False
+use_argmax: True # True or False
 metropolis: False

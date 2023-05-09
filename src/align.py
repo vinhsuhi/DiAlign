@@ -26,6 +26,7 @@ from src.datasets.data_loader_multigraph import GMDataset, get_dataloader
 from src import utils
 from datasets import pascalvoc
 from diffusion_model_discrete import DiscreteDenoisingDiffusion
+from copy import deepcopy
 
 seed_everything(42, workers=True)
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
@@ -71,7 +72,7 @@ def get_setting(cfg):
     if cfg.model.loss_type == 'hybrid' or cfg.model.loss_tpye == 'lvb_advance':
         this_setting += '_ce{:.4f}_vb{:.4f}'.format(cfg.model.ce_weight, cfg.model.vb_weight)  
     if cfg.model.use_argmax:
-        this_setting += '_greedy'
+        this_setting += '_greedy_new'
     return this_setting
 
 
@@ -83,31 +84,44 @@ def main(cfg: DictConfig):
     # let define new dataloader!
     
     dataset_len = {"train": cfg.train.epoch_iters * cfg.train.batch_size, "test": cfg.train.eval_samples}
-    image_dataset = {
-        x: GMDataset(cfg.data_config.name, sets=x, length=dataset_len[x], obj_resize(256, 256)) for x in ("train", "test")
-    }
-    dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
     
-    import pdb; pdb.set_trace()
-    
+    image_dataset_train = GMDataset(cfg.dataset.name, sets='train', cfg=cfg, length=dataset_len['train'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+    batch_sizes = {'train': cfg.train.batch_size, 'test': cfg.train.batch_size_test}
+    dataloader_train = get_dataloader(image_dataset_train, fix_seed=False, batch_size=batch_sizes['train'])
+    # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test"), batch_size=batch_sizes[x]) for x in ("train", "test")}
+    dataloader_train.dataset.set_num_graphs(2)
+    classes = dataloader_train.dataset.classes
+    data_tests = list()
+    data_vals = list()
+    for cls in classes:
+        im_data_test = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=dataset_len['test'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=dataset_len['test'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+        data_tests.append(get_dataloader(im_data_test, fix_seed=True, batch_size=batch_sizes['test']))
+        data_tests[-1].dataset.set_num_graphs(2)
+        data_tests[-1].dataset.set_cls(cls)
+        
+        data_vals.append(get_dataloader(im_data_val, fix_seed=True, batch_size=batch_sizes['test']))
+        data_vals[-1].dataset.set_num_graphs(2)
+        data_vals[-1].dataset.set_cls(cls)
     
     model_kwargs = {}
 
     if cfg.general.test_only:
         saved_cfg, _ = get_resume(cfg, model_kwargs)
+        # update sampling cfg:
+        saved_cfg.model.use_argmax = cfg.model.use_argmax
+        saved_cfg.model.metropolis = cfg.model.metropolis
+        saved_cfg.model.sample_mode = cfg.model.sample_mode
+        cfg = saved_cfg
         os.chdir(cfg.general.test_only.split('checkpoints')[0])
     elif cfg.general.resume is not None:
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
 
-    # update sampling cfg:
-    saved_cfg.model.use_argmax = cfg.model.use_argmax
-    saved_cfg.model.metropolis = cfg.model.metropolis
-    saved_cfg.model.sample_mode = cfg.model.sample_mode
-    cfg = saved_cfg
+    
 
     #utils.create_folders(cfg)
-    model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
+    model = DiscreteDenoisingDiffusion(cfg=cfg, val_names=classes, **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:
@@ -144,6 +158,8 @@ def main(cfg: DictConfig):
 
     this_setting = get_setting(cfg)    
     print(this_setting)
+    
+    
     wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
 
     # we can keep trainer
@@ -154,25 +170,24 @@ def main(cfg: DictConfig):
                       max_epochs=cfg.train.n_epochs,
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       strategy='ddp' if cfg.general.gpus > 1 else None,
-                      enable_progress_bar=cfg.train.progress_bar,
-                      logger=wandb_logger,
+                      enable_progress_bar=cfg.train.progress_bar, logger=wandb_logger,
                       log_every_n_steps=cfg.train.log_every_n_steps,
                       fast_dev_run = cfg.general.name.lower() == 'debug',
                       callbacks=callbacks,
                       deterministic=False)
 
 
-    VISUALIZE_SIZE=2
-    VISUALIZE_RANDOM=False
+    #VISUALIZE_SIZE=2
+    #VISUALIZE_RANDOM=False
 
-    model.train_samples_to_visual = datamodule.visual_dataloader_train(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
-    model.test_samples_to_visual = datamodule.visual_dataloader_test(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
+    #model.train_samples_to_visual = datamodule.visual_dataloader_train(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
+    #model.test_samples_to_visual = datamodule.visual_dataloader_test(shuffle=VISUALIZE_RANDOM, size=VISUALIZE_SIZE)
 
     if not cfg.general.test_only:
-        trainer.fit(model, train_dataloaders=datamodule.train_dataloader(), val_dataloaders=datamodule.pascal_test_, ckpt_path=cfg.general.resume) # ckpt_path is None
-        trainer.test(model, dataloaders=datamodule.pascal_test_)
+        trainer.fit(model, train_dataloaders=dataloader_train, val_dataloaders=data_vals, ckpt_path=cfg.general.resume) # ckpt_path is None
+        trainer.test(model, dataloaders=data_tests)
     else:
-        trainer.test(model, dataloaders=datamodule.pascal_test_, ckpt_path=cfg.general.test_only)
+        trainer.test(model, dataloaders=data_tests, ckpt_path=cfg.general.test_only)
 
     if cfg.general.remove_log:
         dir_path = os.path.dirname(os.path.realpath(__file__)).split('src')[0]

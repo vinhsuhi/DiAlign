@@ -10,7 +10,6 @@ from src.datasets.willow_obj import WillowObject
 from src.datasets.SPair71k import SPair71k
 from src.bbgm_utils.build_graphs import build_graphs
 
-from utils.config import cfg
 from torch_geometric.data import Data, Batch
 
 all_datasets = {"PascalVOC": PascalVOC,
@@ -18,8 +17,9 @@ all_datasets = {"PascalVOC": PascalVOC,
             "SPair71k": SPair71k}
 
 class GMDataset(Dataset):
-    def __init__(self, name, length, **args):
+    def __init__(self, name, length, cfg, **args):
         self.name = name
+        self.cfg = cfg
         self.ds = all_datasets[name](**args)
         self.true_epochs = length is None
         self.length = (
@@ -50,7 +50,7 @@ class GMDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        sampling_strategy = cfg.train_sampling if self.ds.sets == "train" else cfg.eval_sampling
+        sampling_strategy = self.cfg.dataset.train_sampling if self.ds.sets == "train" else self.cfg.dataset.eval_sampling
         if self.num_graphs_in_matching_instance is None:
             raise ValueError("Num_graphs has to be set to an integer value.")
 
@@ -66,6 +66,7 @@ class GMDataset(Dataset):
                 next_idx = None if idx is None else idx + 1
                 return self.__getitem__(next_idx)
 
+        
         points_gt = [np.array([(kp["x"], kp["y"]) for kp in anno_dict["keypoints"]]) for anno_dict in anno_list]
         n_points_gt = [len(p_gt) for p_gt in points_gt]
 
@@ -94,7 +95,9 @@ class GMDataset(Dataset):
 
         imgs = [anno["image"] for anno in anno_list]
         if imgs[0] is not None:
-            trans = transforms.Compose([transforms.ToTensor(), transforms.Normalize(cfg.NORM_MEANS, cfg.NORM_STD)])
+            NORM_MEANS = [0.485, 0.456, 0.406]
+            NORM_STD = [0.229, 0.224, 0.225]
+            trans = transforms.Compose([transforms.ToTensor(), transforms.Normalize(NORM_MEANS, NORM_STD)])
             imgs = [trans(img) for img in imgs]
             ret_dict["images"] = imgs
         elif "feat" in anno_list[0]["keypoints"][0]:
@@ -164,12 +167,12 @@ def collate_fn(data: list):
     return ret
 
 
-def worker_init_fix(worker_id):
+def worker_init_fix(worker_id, seed=0):
     """
     Init dataloader workers with fixed seed.
     """
-    random.seed(cfg.RANDOM_SEED + worker_id)
-    np.random.seed(cfg.RANDOM_SEED + worker_id)
+    random.seed(seed + worker_id)
+    np.random.seed(seed + worker_id)
 
 
 def worker_init_rand(worker_id):
@@ -181,12 +184,12 @@ def worker_init_rand(worker_id):
     np.random.seed(torch.initial_seed() % 2 ** 32)
 
 
-def get_dataloader(dataset, fix_seed=True, shuffle=False):
+def get_dataloader(dataset, fix_seed=True, shuffle=False, batch_size=8):
     return torch.utils.data.DataLoader(
         dataset,
-        batch_size=cfg.BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=2,
+        num_workers=6,
         collate_fn=collate_fn,
         pin_memory=False,
         worker_init_fn=worker_init_fix if fix_seed else worker_init_rand,

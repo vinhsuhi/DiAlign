@@ -7,7 +7,7 @@ import random
 import numpy as np
 from PIL import Image
 
-from utils.config import cfg
+from src.bbgm_utils.config import bbgm_cfg as cfg
 
 cache_path = cfg.CACHE_PATH
 pair_ann_path = cfg.SPair.ROOT_DIR + "/PairAnnotation"

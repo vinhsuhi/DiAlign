@@ -6,14 +6,20 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from utils.config import cfg
-from utils.utils import lexico_iter
+from src.bbgm_utils.config import bbgm_cfg
+from src.bbgm_utils.utils import lexico_iter
 
-anno_path = cfg.VOC2011.KPT_ANNO_DIR
-img_path = cfg.VOC2011.ROOT_DIR + "JPEGImages"
-ori_anno_path = cfg.VOC2011.ROOT_DIR + "Annotations"
-set_path = cfg.VOC2011.SET_SPLIT
-cache_path = cfg.CACHE_PATH
+'''
+check!
+'''
+
+
+anno_path = bbgm_cfg.VOC2011.KPT_ANNO_DIR
+img_path = bbgm_cfg.VOC2011.ROOT_DIR + "JPEGImages"
+ori_anno_path = bbgm_cfg.VOC2011.ROOT_DIR + "Annotations"
+set_path = bbgm_cfg.VOC2011.SET_SPLIT
+cache_path = bbgm_cfg.CACHE_PATH
+
 
 KPT_NAMES = {
     "cat": [
@@ -279,25 +285,25 @@ KPT_NAMES = {
 
 
 class PascalVOC:
-    def __init__(self, sets, obj_resize):
+    def __init__(self, sets, obj_resize, base_dir, exclude_willow_classes=False):
         """
         :param sets: 'train' or 'test'
         :param obj_resize: resized object size
         """
-        self.classes = cfg.VOC2011.CLASSES
-        self.kpt_len = [len(KPT_NAMES[_]) for _ in cfg.VOC2011.CLASSES]
+        self.classes = bbgm_cfg.VOC2011.CLASSES
+        self.kpt_len = [len(KPT_NAMES[_]) for _ in bbgm_cfg.VOC2011.CLASSES]
 
         self.classes_kpts = {cls: len(KPT_NAMES[cls]) for cls in self.classes}
 
-        self.anno_path = Path(anno_path)
-        self.img_path = Path(img_path)
-        self.ori_anno_path = Path(ori_anno_path)
+        self.anno_path = Path(base_dir + anno_path)
+        self.img_path = Path(base_dir + img_path)
+        self.ori_anno_path = Path(base_dir + ori_anno_path)
         self.obj_resize = obj_resize
         self.sets = sets
 
         assert sets in ["train", "test"], "No match found for dataset {}".format(sets)
         cache_name = "voc_db_" + sets + ".pkl"
-        self.cache_path = Path(cache_path)
+        self.cache_path = Path(base_dir + cache_path)
         self.cache_file = self.cache_path / cache_name
         if self.cache_file.exists():
             with self.cache_file.open(mode="rb") as f:
@@ -306,16 +312,16 @@ class PascalVOC:
         else:
             print("Caching xml list to {}...".format(self.cache_file))
             self.cache_path.mkdir(exist_ok=True, parents=True)
-            with np.load(set_path, allow_pickle=True) as f:
+            with np.load(base_dir + set_path, allow_pickle=True) as f:
                 self.xml_list = f[sets]
             before_filter = sum([len(k) for k in self.xml_list])
-            self.filter_list()
+            self.filter_list(exclude_willow_classes)
             after_filter = sum([len(k) for k in self.xml_list])
             with self.cache_file.open(mode="wb") as f:
                 pickle.dump(self.xml_list, f)
             print("Filtered {} images to {}. Annotation saved.".format(before_filter, after_filter))
 
-    def filter_list(self):
+    def filter_list(self, exclude_willow_classes):
         """
         Filter out 'truncated', 'occluded' and 'difficult' images following the practice of previous works.
         In addition, this dataset has uncleaned label (in person category). They are omitted as suggested by README.
@@ -351,7 +357,7 @@ class PascalVOC:
                     continue
 
                 # Exclude overlapping images in Willow
-                if cfg.exclude_willow_classes:
+                if exclude_willow_classes:
                     if (
                             self.sets == "train"
                             and (self.classes[cls_id] == "motorbike" or self.classes[cls_id] == "car")
