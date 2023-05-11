@@ -6,8 +6,8 @@ gpus: 1                   # Multi-gpu is not implemented on this branch
 resume: null            # If resume, path to ckpt file from outputs directory in main directory
 test_only: null         # Use absolute path
 
-check_val_every_n_epochs: 3
+check_val_every_n_epochs: 1
 log_every_steps: 50
 remove_log: False
-base_dir: '/home/admin/vinh/DiAlign/'
+base_dir: '/netscratch/duynguyen/Research/vinh/DiAlign/'
 

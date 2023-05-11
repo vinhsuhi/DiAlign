@@ -126,7 +126,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         s_mask = update_info['s_mask']
         X0 = batch['gt_perm_mat'][0]
         
-        sample, pred = self.sample_batch(batch, update_info)
+        noisy_data = self.apply_noise(X0, update_info)
+        pred = self.forward(noisy_data, s_mask, batch, update_info)
+        #sample, pred = self.sample_batch(batch, update_info)
         test_acc = self.val_acc(pred, X0[s_mask])
         self.log("test/acc_epoch/{}".format(category), test_acc, batch_size=X0.sum().item())
         return {'test_acc': test_acc, 'bs': X0.sum().item()}

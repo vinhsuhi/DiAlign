@@ -8,16 +8,17 @@ class InnerProductWithWeightsAffinity(nn.Module):
         self.d = output_dim
         self.A = torch.nn.Linear(input_dim, output_dim)
 
-    def _forward(self, X, Y, weights):
+    def forward(self, X, Y, weights):
         '''
         weights: global weight!
         '''
-        assert X.shape[1] == Y.shape[1] == self.d, (X.shape[1], Y.shape[1], self.d)
-        #coefficients = torch.tanh(self.A(weights)) # linear transform the global weight!
-        coefficients = 1
-        res = torch.matmul(X * coefficients, Y.transpose(0, 1))
+        # import pdb; pdb.set_trace()
+        # assert X.shape[1] == Y.shape[1] == self.d, (X.shape[1], Y.shape[1], self.d)
+        coefficients = torch.tanh(self.A(weights)).unsqueeze(1)
+        #res = torch.matmul(X * coefficients, Y.transpose(0, 1))
+        res = (X * coefficients) @ Y.transpose(-2, -1)
         #res = torch.nn.functional.softplus(res) - 0.5
         return res
 
-    def forward(self, Xs, Ys, Ws):
-        return [self._forward(X, Y, W) for X, Y, W in zip(Xs, Ys, Ws)]
+    # def forward(self, Xs, Ys, Ws):
+    #     return [self._forward(X, Y, W) for X, Y, W in zip(Xs, Ys, Ws)]

@@ -66,13 +66,13 @@ def get_resume_adaptive(cfg, model_kwargs):
 
 
 def get_setting(cfg):
-    this_setting = "t{}_T{}_{}_{}_{}".format(cfg.model.use_time, cfg.model.diffusion_steps, cfg.model.loss_type, cfg.model.sample_mode, cfg.train.lr)
+    this_setting = "{}_T{}_{}_{}".format(cfg.model.transition, cfg.model.diffusion_steps, cfg.model.sample_mode, cfg.train.lr)
     if cfg.model.metropolis:
         this_setting = this_setting + '_metro'
     if cfg.model.loss_type == 'hybrid' or cfg.model.loss_tpye == 'lvb_advance':
         this_setting += '_ce{:.4f}_vb{:.4f}'.format(cfg.model.ce_weight, cfg.model.vb_weight)  
     if cfg.model.use_argmax:
-        this_setting += '_greedy_na'
+        this_setting += '_hungarian'
     return this_setting
 
 
@@ -95,7 +95,7 @@ def main(cfg: DictConfig):
     data_vals = list()
     for cls in classes:
         im_data_test = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=dataset_len['test'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
-        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=100, obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=1000, obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
         data_tests.append(get_dataloader(im_data_test, fix_seed=True, batch_size=batch_sizes['test']))
         data_tests[-1].dataset.set_num_graphs(2)
         data_tests[-1].dataset.set_cls(cls)
