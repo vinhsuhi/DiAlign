@@ -26,7 +26,7 @@ def masked_softmax(src, mask, dim=-1):
 
 
 class GraphTransformerMatching(nn.Module):
-    def __init__(self, scalar_dim=20, num_layers=3, ori_feat_dim=1024, embed_dim=128, cat=True, lin=True, dropout=0.0, use_time=True):
+    def __init__(self, scalar_dim=20, num_layers=2, ori_feat_dim=1024, embed_dim=1024, cat=False, lin=True, dropout=0.0, use_time=True):
         super().__init__()
         self.positional_encoding = SinusoidalPosEmb(dim=scalar_dim)
         self.scalar_dim = scalar_dim
@@ -68,7 +68,6 @@ class GraphTransformerMatching(nn.Module):
         device = s_mask.device
         if self.scalar_dim > 1:
             time_emb = self.positional_encoding(noisy_data['t'].to(device))
-
             num_aligned_src = self.positional_encoding(noisy_data['Xt'].sum(dim=-1)[s_mask] / 10)
             num_aligned_trg = self.positional_encoding(noisy_data['Xt'].transpose(1, 2).sum(dim=-1)[t_mask] / 10)
         else:
@@ -106,8 +105,8 @@ class GraphTransformerMatching(nn.Module):
             target_messages = noisy_data['Xt'].float() @ x_padded_trg
             source_messages = noisy_data['Xt'].float().transpose(1, 2) @ x_padded_src
 
-            diff_src_ = x_padded_src - target_messages
-            diff_trg_ = x_padded_trg - source_messages
+            diff_src_ = x_padded_src - target_messages # X_s || X_s - S * X_t
+            diff_trg_ = x_padded_trg - source_messages # X_t || X_t - S * X_s
 
             diff_src = diff_src_[s_mask]
             diff_trg = diff_trg_[t_mask]

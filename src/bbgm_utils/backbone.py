@@ -9,6 +9,7 @@ class VGG16_base(nn.Module):
     def __init__(self, batch_norm=True):
         super(VGG16_base, self).__init__()
         self.node_layers, self.edge_layers, self.final_layers = self.get_backbone(batch_norm)
+        
 
     def forward(self, *input):
         raise NotImplementedError
@@ -23,6 +24,9 @@ class VGG16_base(nn.Module):
             model = models.vgg16_bn(pretrained=True)
         else:
             model = models.vgg16(pretrained=True)
+            
+        for param in model.parameters():
+            param.requires_grad = False
 
         conv_layers = nn.Sequential(*list(model.features.children()))
 

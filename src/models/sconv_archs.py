@@ -28,9 +28,8 @@ class SConv(torch.nn.Module):
     def forward(self, data):
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
         xs = [x]
-
         for conv in self.convs[:-1]:
-            xs += [F.relu(conv(xs[-1], edge_index, edge_attr)) + xs[-1] * 0.1]
+            xs += [F.relu(conv(xs[-1], edge_index, edge_attr))]
 
         xs += [self.convs[-1](xs[-1], edge_index, edge_attr)]
         return xs[-1]
@@ -41,17 +40,20 @@ class SiameseSConvOnNodes(torch.nn.Module):
         super(SiameseSConvOnNodes, self).__init__()
         self.num_node_features = input_node_dim
         self.out_dim = out_dim
-        self.lin_tran = torch.nn.Linear(self.num_node_features, self.out_dim)
+        self.lin_tran = torch.nn.Linear(self.num_node_features, 700)
+        self.act = torch.nn.Tanh()
+        
+        self.lin_tran2 = torch.nn.Linear(700, out_dim)
         self.mp_network = SConv(
             input_features=self.num_node_features, output_features=self.out_dim)
 
     def forward(self, graph):
-        old_features = graph.x
+        old_features = self.lin_tran2(self.act(self.lin_tran(graph.x)))
         result = self.mp_network(graph)
-        if self.out_dim < self.num_node_features:
-            graph.x = self.lin_tran(old_features) + 0.1 * result
-        else:
-            graph.x = old_features + 0.1 * result
+        # if self.out_dim < self.num_node_features:
+        graph.x = old_features + 0.1 * result
+        # else:
+        #graph.x = result 
         return graph
 
 

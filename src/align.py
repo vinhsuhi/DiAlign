@@ -31,6 +31,9 @@ from copy import deepcopy
 seed_everything(42, workers=True)
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 
+complex = False
+without_diff = True
+temper = False
 
 def get_resume(cfg, model_kwargs):
     name = cfg.general.name + '_resume'
@@ -66,13 +69,19 @@ def get_resume_adaptive(cfg, model_kwargs):
 
 
 def get_setting(cfg):
-    this_setting = "{}_T{}_{}_{}".format(cfg.model.transition, cfg.model.diffusion_steps, cfg.model.sample_mode, cfg.train.lr)
+    if without_diff:
+        this_setting = 'withoutdiff'
+        return this_setting
+    this_setting = "{}_T{}_{}_{}_ns{}".format(cfg.model.transition, cfg.model.diffusion_steps, cfg.model.sample_mode, cfg.train.lr, cfg.model.diffusion_noise_schedule)
     if cfg.model.metropolis:
         this_setting = this_setting + '_metro'
-    if cfg.model.loss_type == 'hybrid' or cfg.model.loss_tpye == 'lvb_advance':
+    if cfg.model.loss_type == 'hybrid' or cfg.model.loss_type == 'lvb_advance':
         this_setting += '_ce{:.4f}_vb{:.4f}'.format(cfg.model.ce_weight, cfg.model.vb_weight)  
     if cfg.model.use_argmax:
         this_setting += '_hungarian'
+    if complex:
+        this_setting += 'complex'    
+    
     return this_setting
 
 
@@ -80,9 +89,6 @@ def get_setting(cfg):
 def main(cfg: DictConfig):
     config = dict()
 
-    # datamodule = pascalvoc.PascalVOCModule(cfg)
-    # let define new dataloader!
-    
     dataset_len = {"train": cfg.train.epoch_iters * cfg.train.batch_size, "test": cfg.train.eval_samples}
     
     image_dataset_train = GMDataset(cfg.dataset.name, sets='train', cfg=cfg, length=dataset_len['train'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
@@ -94,8 +100,8 @@ def main(cfg: DictConfig):
     data_tests = list()
     data_vals = list()
     for cls in classes:
-        im_data_test = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=dataset_len['test'], obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
-        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=1000, obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+        im_data_test = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=1000, obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
+        im_data_val = GMDataset(cfg.dataset.name, sets='test', cfg=cfg, length=100, obj_resize=(256, 256), base_dir=cfg.general.base_dir, exclude_willow_classes=cfg.dataset.exclude_willow_classes)
         data_tests.append(get_dataloader(im_data_test, fix_seed=True, batch_size=batch_sizes['test']))
         data_tests[-1].dataset.set_num_graphs(2)
         data_tests[-1].dataset.set_cls(cls)
@@ -111,6 +117,7 @@ def main(cfg: DictConfig):
         saved_cfg.model.use_argmax = cfg.model.use_argmax
         saved_cfg.model.metropolis = cfg.model.metropolis
         saved_cfg.model.sample_mode = cfg.model.sample_mode
+        # saved_cfg.general.visual_heat = cfg.general.visual_heat
         cfg = saved_cfg
         os.chdir(cfg.general.test_only.split('checkpoints')[0])
     elif cfg.general.resume is not None:
@@ -119,6 +126,9 @@ def main(cfg: DictConfig):
 
     #utils.create_folders(cfg)
     model = DiscreteDenoisingDiffusion(cfg=cfg, val_names=classes, **model_kwargs)
+    
+    model.complex = complex
+    model.without_diff = without_diff
 
     callbacks = []
     if cfg.train.save_model:
@@ -132,20 +142,6 @@ def main(cfg: DictConfig):
         callbacks.append(last_ckpt_save)
         callbacks.append(checkpoint_callback)
 
-    # library bug!
-    # progress_bar = RichProgressBar(
-    #     theme=RichProgressBarTheme(
-    #         description="green_yellow",
-    #         progress_bar="green1",
-    #         progress_bar_finished="green1",
-    #         progress_bar_pulse="#6206E0",
-    #         batch_progress="green_yellow",
-    #         time="grey82",
-    #         processing_speed="grey82",
-    #         metrics="grey82",
-    #     )
-    # )
-    # callbacks.append(progress_bar)
 
     name = cfg.general.name
     if name == 'test':
@@ -157,21 +153,37 @@ def main(cfg: DictConfig):
     print(this_setting)
     
     
-    wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
+    if cfg.general.test_only is None and 0:
+        
+        wandb_logger = WandbLogger(project=f'dialign_{cfg.dataset.name}', name=this_setting)
 
-    # we can keep trainer
-    trainer = Trainer(
-                      gradient_clip_val=cfg.train.clip_grad,
-                      accelerator='gpu' if torch.cuda.is_available() and cfg.general.gpus > 0 else 'cpu',
-                      devices=cfg.general.gpus if torch.cuda.is_available() and cfg.general.gpus > 0 else None,
-                      max_epochs=cfg.train.n_epochs,
-                      check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
-                      strategy='ddp' if cfg.general.gpus > 1 else None,
-                      enable_progress_bar=cfg.train.progress_bar, logger=wandb_logger,
-                      log_every_n_steps=cfg.train.log_every_n_steps,
-                      fast_dev_run = cfg.general.name.lower() == 'debug',
-                      callbacks=callbacks,
-                      deterministic=False)
+        # we can keep trainer
+        trainer = Trainer(
+                        gradient_clip_val=cfg.train.clip_grad,
+                        accelerator='gpu' if torch.cuda.is_available() and cfg.general.gpus > 0 else 'cpu',
+                        devices=cfg.general.gpus if torch.cuda.is_available() and cfg.general.gpus > 0 else None,
+                        max_epochs=cfg.train.n_epochs,
+                        check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
+                        strategy='ddp' if cfg.general.gpus > 1 else None,
+                        enable_progress_bar=cfg.train.progress_bar, logger=wandb_logger,
+                        log_every_n_steps=cfg.train.log_every_n_steps,
+                        fast_dev_run = cfg.general.name.lower() == 'debug',
+                        callbacks=callbacks,
+                        deterministic=False)
+    else:
+        # we can keep trainer
+        trainer = Trainer(
+                        gradient_clip_val=cfg.train.clip_grad,
+                        accelerator='gpu' if torch.cuda.is_available() and cfg.general.gpus > 0 else 'cpu',
+                        devices=cfg.general.gpus if torch.cuda.is_available() and cfg.general.gpus > 0 else None,
+                        max_epochs=cfg.train.n_epochs,
+                        check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
+                        strategy='ddp' if cfg.general.gpus > 1 else None,
+                        enable_progress_bar=cfg.train.progress_bar, #logger=wandb_logger,
+                        log_every_n_steps=cfg.train.log_every_n_steps,
+                        fast_dev_run = cfg.general.name.lower() == 'debug',
+                        callbacks=callbacks,
+                        deterministic=False)
 
 
     #VISUALIZE_SIZE=2
@@ -188,7 +200,38 @@ def main(cfg: DictConfig):
 
     if cfg.general.remove_log:
         dir_path = os.path.dirname(os.path.realpath(__file__)).split('src')[0]
+        print('removing log...')
         shutil.rmtree(dir_path)
 
 if __name__ == '__main__':
     main()
+
+
+'''
+Hey Vinh, 
+How are you doing?
+What do you want to do now?
+
+Why do you think diffusion does not really help?
+
+Because the model is too confidence on it's prediction?
+
+yes!
+
+Why do we need diffusion from begining?
+
+why generative model?
+
+because we want to generate something from a distribution. 
+
+If there is no distribution but only one exact answer for each 
+
+
+Another observation is that many alignment problems are actually 
+iteratively improve the alignment accuracy
+
+S0 = some initialized alignment
+S1 = f(S0, G1, G2)
+S2 = f(S1, G1, G2)
+S3 = f(S2, G1, G2)
+'''

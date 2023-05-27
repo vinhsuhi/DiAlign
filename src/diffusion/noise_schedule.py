@@ -59,6 +59,8 @@ class PredefinedNoiseScheduleDiscrete(torch.nn.Module):
             betas = diffusion_utils.cosine_beta_schedule_discrete(timesteps)
         elif noise_schedule == 'custom':
             betas = diffusion_utils.custom_beta_schedule_discrete(timesteps)
+        elif noise_schedule == 'lin':
+            betas = diffusion_utils.linear_beta_schedule_discrete(timesteps)
         else:
             raise NotImplementedError(noise_schedule)
 

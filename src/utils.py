@@ -240,3 +240,47 @@ class PlaceHolder:
         return self
 
 
+def visualise_one_dist(mat, path_base, full_path):
+    ax = sns.heatmap(mat, linewidth=2, annot=True, fmt='.2f', vmin=0, vmax=1)
+    plt.tight_layout()
+    if not os.path.exists(path_base):
+        os.mkdir(path_base)
+    plt.savefig(full_path)
+    plt.close()
+
+
+def visualise_dist(X, prob_Xs_given_Xt, p_probX0, q_Xs_given_Xt_and_X0, X0, s_int):
+    base_dir = '/netscratch/duynguyen/Research/vinh/DiAlign/'
+    if not os.path.exists('{}heat_figs'.format(base_dir)):
+        os.mkdir('{}heat_figs'.format(base_dir))
+    for idx in range(bs):
+        if s_int == self.T - 1:
+            this_X0 = X0[idx][s_mask[idx]][:, t_mask[idx]].cpu().detach().numpy()
+            path_base = '{}heat_figs/batch_{}'.format(base_dir,idx)
+            full_path = path_base + '/gt.png'
+            self.visualise_one_dist(this_X0, path_base, full_path)
+            
+        this_mat = prob_Xs_given_Xt[idx][s_mask[idx]][:, t_mask[idx]].cpu().detach().numpy()
+        path_base = '{}heat_figs/batch_{}'.format(base_dir,idx)
+        full_path = path_base + '/t{}.png'.format(s_int)
+        self.visualise_one_dist(this_mat, path_base, full_path)
+        
+        this_mat_p0 = p_probX0[idx][s_mask[idx]][:, t_mask[idx]].cpu().detach().numpy()
+        path_base = '{}heat_figs/batch_{}/probX0'.format(base_dir,idx)
+        full_path = path_base + '/t{}.png'.format(s_int)
+        self.visualise_one_dist(this_mat_p0, path_base, full_path)
+        
+        this_mat_samplet = X[idx][s_mask[idx]][:, t_mask[idx]].cpu().detach().numpy()
+        path_base = '{}heat_figs/batch_{}/probX0'.format(base_dir,idx)
+        full_path = path_base + '/sampled_t{}.png'.format(s_int)
+        self.visualise_one_dist(this_mat_samplet, path_base, full_path)
+        
+        this_q = q_Xs_given_Xt_and_X0[idx][s_mask[idx]][:, t_mask[idx]].cpu().detach().numpy()
+        path_base = '{}heat_figs/batch_{}/q_pos'.format(base_dir,idx)
+        full_path = path_base + '/t{}.png'.format(s_int)
+        self.visualise_one_dist(this_q, path_base, full_path)
+        
+        this_Q = Qt[idx][:t_mask[idx].sum(), :t_mask[idx].sum()].cpu().detach().numpy()
+        path_base = '{}heat_figs/batch_{}/Qt'.format(base_dir,idx)
+        full_path = path_base + '/t{}.png'.format(s_int)
+        self.visualise_one_dist(this_Q, path_base, full_path)

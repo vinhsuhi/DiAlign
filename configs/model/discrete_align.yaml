@@ -2,15 +2,12 @@
 type: 'discrete_align'
 transition: 'uniform'                          # uniform or matching
 model: 'graph_tf'
-diffusion_steps: 50
-diffusion_noise_schedule: 'cosine'              # 'cosine', 'polynomial_2'
+diffusion_steps: 15
+diffusion_noise_schedule: 'cosine'              # 'cosine', 'lin'
 scalar_dim: 20 # rightnow it is a little bit problematic
 num_visual: 8
-cat: False # should be false
-lin: True
 dropout: 0.0
-use_time: True
-loss_type: 'hybrid' # 'hybrid', 'lvb_advance', or 'ce'
+loss_type: 'ce' # 'hybrid', 'lvb_advance', or 'ce'
 sample_mode: 'wr' # 'wor' or 'wr'
 ce_weight: 1.
 vb_weight: 0.0

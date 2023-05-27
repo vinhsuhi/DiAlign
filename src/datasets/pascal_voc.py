@@ -16,7 +16,7 @@ check!
 
 anno_path = bbgm_cfg.VOC2011.KPT_ANNO_DIR
 img_path = bbgm_cfg.VOC2011.ROOT_DIR + "JPEGImages"
-ori_anno_path = bbgm_cfg.VOC2011.ROOT_DIR + "Annotations"
+ori_anno_path = bbgm_cfg.VOC2011.ROOT_DIR + "data/Annotations"
 set_path = bbgm_cfg.VOC2011.SET_SPLIT
 cache_path = bbgm_cfg.CACHE_PATH
 

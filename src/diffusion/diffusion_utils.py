@@ -2,7 +2,7 @@ import torch
 from torch.nn import functional as F
 import numpy as np
 import math
-
+from scipy.optimize import linear_sum_assignment
 from src.utils import PlaceHolder
 
 
@@ -62,6 +62,17 @@ def cosine_alpha_bar_schedule(timesteps, s=0.008, raise_to_power: float = 1):
     return alphas_cumprod
 
 
+def linear_beta_schedule_discrete(timesteps):
+    """
+    linear schedule, proposed in original ddpm paper
+    """
+    # scalx = 1000 / timesteps
+    steps = timesteps + 1
+    beta_start = 0
+    beta_end = 1
+    return torch.linspace(beta_start, beta_end, steps, dtype = torch.float64).numpy()
+
+
 def cosine_beta_schedule_discrete(timesteps, s=0.008):
     """ Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ. """
     steps = timesteps + 2
@@ -95,7 +106,6 @@ def custom_beta_schedule_discrete(timesteps, average_num_nodes=50, s=0.008):
 
     betas[betas < beta_first] = beta_first
     return np.array(betas)
-
 
 
 def gaussian_KL(q_mu, q_sigma):
@@ -288,6 +298,7 @@ def compute_posterior_distribution(M, M_t, Qt_M, Qsb_M, Qtb_M):
 
     prob = product / denom.unsqueeze(-1)    # (bs, N, d)
 
+
     return prob
 
 
@@ -397,4 +408,336 @@ def sample_discrete_feature_noise(limit_dist, node_mask):
 
     return PlaceHolder(X=U_X, E=U_E, y=U_y).mask(node_mask)
 
+######## I WILL TRANSFER SOME FUNCTIONS FROM FILE DIFFUSION MODEL DISCRETE HERE
+
+def kl_divergence_with_probs(p = None, q = None, epsilon = 1e-20):
+    """Compute the KL between two categorical distributions from their probabilities.
+
+    Args:
+        p: [..., dim] array with probs for the first distribution.
+        q: [..., dim] array with probs for the second distribution.
+        epsilon: a small float to normalize probabilities with.
+
+    Returns:
+        an array of KL divergence terms taken over the last axis.
+    """
+    log_p = torch.log(p + epsilon)
+    log_q = torch.log(q + epsilon)
+    kl = torch.sum(p * (log_p - log_q), dim=-1)
+
+    ## KL divergence should be positive, this helps with numerical stability
+    loss = F.relu(kl)
+    return loss
+
+def sample_discrete_features_align_wor(q_probXt, s_mask, t_mask, device):
+    '''
+    Sample features from multinomial distribution (w/o replacement) with given probabilities
+    '''
+    bs, n, _ = q_probXt.shape
+    q_probXt[~s_mask] = 1 / q_probXt.shape[-1]
+
+    samples = list()
+    for i in range(len(q_probXt)): # iterate over batch samples
+        this_probX = q_probXt[i].clone()
+        this_s_mask = s_mask[i]
+        this_t_mask = t_mask[i]
+        num_nodes_src = this_s_mask.sum().item()
+        num_nodes_trg = this_t_mask.sum().item()
+        random_indices_src = torch.randperm(num_nodes_src).to(device) # keep this
+            
+        srcs = list()
+        trgs = list()
+        for j in range(len(random_indices_src)):
+            src_node = random_indices_src[j].item()
+            src_prob = (this_probX[src_node] + 1e-12) / (this_probX[src_node] + 1e-12).sum()
+            trg_node = src_prob.multinomial(1).item()
+            this_probX[:, trg_node] = 0
+            srcs.append(src_node)
+            trgs.append(trg_node)
+
+        srcs = torch.LongTensor(srcs).to(device)
+        trgs = torch.LongTensor(trgs).to(device)
+
+        if this_probX.shape[0] > num_nodes_src:
+            left_over_src = torch.arange(num_nodes_src, this_probX.shape[0]).to(device)
+            left_over_trg = [this_probX.shape[1] - 1] * len(left_over_src)
+            left_over_trg = torch.LongTensor(left_over_trg).to(device)
+            srcs = torch.cat((srcs, left_over_src))
+            trgs = torch.cat((trgs, left_over_trg))
+        
+        samples.append(trgs[srcs.sort()[1]])
+    Xt = torch.stack(samples) # (bs, n)
+    return Xt
+
+
+def sample_discrete_features_align_wr(q_probXt, s_mask):
+    ''' Sample features from multinomial distribution with given probabilities q_probXt
+        :param q_probXt: bs, n, dx_out        node features
+    '''
+    bs, n, _ = q_probXt.shape
+    # Noise X
+    # The masked rows should define probability distributions as well
+    q_probXt[~s_mask] = 1 / q_probXt.shape[-1]
+
+    # Flatten the probability tensor to sample with multinomial
+    q_probXt = q_probXt.reshape(bs * n, -1)       # (bs * n, dx_out)
+
+    # Sample X
+    Xt = q_probXt.multinomial(1)                                  # (bs * n, 1)
+    Xt = Xt.reshape(bs, n)     # (bs, n)
+    return Xt
+
+
+def metropolis_hastings_one_batch(prob, n_episodes):
+    N = prob.shape[1] # N is the number of target nodes (which is greater or equal number of source nodes)
+    n = prob.shape[0] # n is the number of source nodes
+
+    # adding pseudo nodes to graph (so that we have equal N and n), and pseudo alignment prob!
+    padded_prob = torch.zeros(N, N).cuda()
+    padded_prob[:n,:] = prob
+    padded_prob[n:, :] += 1 / N # uniform transition probs for pseudo nodes
+
+    # initialize sigma - a random asignment of source nodes to target nodes, but valid?
+    sigma = torch.randperm(N).cuda()
+    # initialize pi
+    pi = torch.zeros(N).long().cuda()
+    # initialize mapping
+    # source node `i` is mapped to target node `mapping[i]`
+    mapping = torch.argsort(sigma) # oh shit!
+
+    for _ in range(n_episodes): # until converge
+        this_prob = padded_prob.clone()
+        # step 1
+        for i in range(N):
+            this_prob_row = this_prob[sigma[i].item()]
+            # re-normalize the prob:
+            this_prob_row = (this_prob_row + 1e-12) / (this_prob_row + 1e-12).sum()
+            # take a sample for the src node
+            pi[i] = this_prob_row.multinomial(1).item() # pi[i] = j; sigma[i] -- p
+            this_prob[:, pi[i]] = 0 # mask the sampled one
+        
+        this_prob = padded_prob.clone() # one instance from the batch
+        # step 2
+        log_prob_pi = torch.log(this_prob[sigma, pi]).sum()
+        log_prob_sigma = torch.log(this_prob[sigma, torch.arange(N).cuda()]).sum()
+
+        # log(q(pi|sigma)) = sum()
+        log_q_pi_given_sigma = torch.tensor(0.0).cuda()
+        this_prob = padded_prob.clone()
+        for i in range(N):
+            # re-normalize the remaining probs
+            this_prob = (this_prob + 1e-12) / (this_prob + 1e-12).sum(dim=1, keepdim=True)
+            # take the probability of pair (sigma(i), pi(i))
+            # shouldn't it be this_prob[[pi[sigma]]| sigma]
+            log_q_pi_given_sigma += torch.log(this_prob[sigma[i], pi[i]])
+            this_prob[:, pi[:i]] = 0
+        
+        log_q_sigma_given_pi = torch.tensor(0.0).cuda()
+        this_prob = padded_prob.clone()
+        for i in range(N):
+            # re-normalize the remaining probs
+            this_prob = (this_prob + 1e-12) / (this_prob + 1e-12).sum(dim=1, keepdim=True)
+            # take the probability of pair (pi(i), sigma(i))
+            log_q_sigma_given_pi += torch.log(this_prob[pi[i], sigma[i]])
+            this_prob[:, sigma[:i]] = 0
+        
+        # if Uniform(0,1) < p(π)·q(σ|π) / (p(σ)·q(π|σ))
+        acc_prob = torch.exp(log_prob_pi + log_q_sigma_given_pi - (log_prob_sigma + log_q_pi_given_sigma))
+        if np.random.rand() < acc_prob:
+            # accept new sigma
+            sigma = pi[sigma]
+            mapping = torch.argsort(sigma)
+
+        # source node `i` is mapped to target node `mapping[i]`
+    return mapping[:n].detach().cpu().numpy()
+
+def sample_by_hungarian(q_probXt, s_mask, t_mask, device):
+    bs, n, _ = q_probXt.shape 
+    q_probXt[~s_mask] = 0
+    samples = list() 
+    for b in range(bs):
+        this_probXt = q_probXt[b].detach().cpu().numpy() # cost matrix
+        srcs, trgs = linear_sum_assignment(1 - this_probXt)
+        samples.append(torch.LongTensor(trgs[srcs.sort()]).to(device))
+    Xt = torch.cat(samples, dim=0)
+    return Xt 
+
+
+def perturb_sampling_one_batch(prob, this_temperature, device):
+    '''
+    prob: the posterior of size (n_src_nodes x n_trg_nodes)
+    '''
+    from torch.distributions.gumbel import Gumbel
+    log_prob = torch.log(prob)
+    # generate gumbel noise Gumbel(0, 1)
+    gumbel_distribution = Gumbel(loc=torch.tensor([0.0]), scale=torch.tensor([this_temperature]))
+    # sample N x N gumbel noise instances
+    gumbel_noises = gumbel_distribution.sample(log_prob.shape).to(self.device).squeeze()
+
+    # log(p) + e
+    combined_ = log_prob + gumbel_noises
+
+    # cost_matrix = - simi_matrix (or alignment matrix)
+    cost = -combined_
+    cost = cost.detach().cpu().numpy()
+
+    # run Hungarian algorithm
+    srcs, trgs = linear_sum_assignment(cost)
+
+    this_sample = trgs[srcs.sort()]
+    
+    return this_sample
+ 
+ 
+def sample_discrete_feature_noise_wor(bs, mask_align, s_mask, t_mask, lim_dist, device):
+    sample = list()
+    for i in range(bs):
+        mask_align_i = mask_align[i]
+        this_s_mask = s_mask[i]
+        this_t_mask = t_mask[i]
+        num_nodes_src = this_s_mask.sum().item()
+        num_nodes_trg = this_t_mask.sum().item()
+        random_indices_src = torch.randperm(num_nodes_src).to(device)
+        random_indices_trg = torch.randperm(num_nodes_trg).to(device)
+        trg_assigned_to_src = random_indices_trg[:num_nodes_src]
+
+        if (mask_align_i.shape[0] > num_nodes_src):
+            left_over_trg = random_indices_trg[num_nodes_src:]
+            if mask_align_i.shape[1] > num_nodes_trg:
+                left_over_trg = torch.cat((left_over_trg, torch.arange(num_nodes_trg, mask_align_i.shape[1]).to(device)))
+            left_over_src = torch.arange(num_nodes_src, mask_align_i.shape[0]).to(device)
+            left_over_trg_assigned_to_src = left_over_trg[:len(left_over_src)]
+            final_trg_assigned = torch.cat((trg_assigned_to_src, left_over_trg_assigned_to_src))
+            final_indices_src = torch.cat((random_indices_src, left_over_src))
+        else:
+            final_trg_assigned = trg_assigned_to_src
+            final_indices_src = random_indices_src
+
+        sample.append(final_trg_assigned[final_indices_src.sort()[1]])
+    sample = torch.stack(sample)
+    long_mask = s_mask.long()
+    sample = sample.type_as(long_mask)
+
+    sample = F.one_hot(sample, num_classes=lim_dist.shape[-1]).float()
+    return sample
+
+def gen_inter_info(data, device):
+    '''
+    speed optimized! DONE!
+    '''
+    bs = len(data['gt_perm_mat'][0])
+    num_classes = data['gt_perm_mat'][0].shape[-1]
+    num_variables = data['gt_perm_mat'][0].shape[-2]
+    
+    src_graph, trg_graph = data['edges'][0], data['edges'][1]
+    num_src_nodes = torch.bincount(src_graph.batch)
+    num_trg_nodes = torch.bincount(trg_graph.batch)
+    
+    s_mask = torch.zeros(bs, num_variables).to(device).bool()
+    t_mask = torch.zeros(bs, num_classes).to(device).bool()
+    
+    for idx in range(bs):
+        s_mask[idx][:num_src_nodes[idx].item()] = True
+        t_mask[idx][:num_trg_nodes[idx].item()] = True
+        
+    mask_align = s_mask.unsqueeze(2) * t_mask.unsqueeze(1)
+    mask_transition = t_mask.unsqueeze(2) * t_mask.unsqueeze(1)
+    
+    update_info = dict()
+    update_info['s_mask'] = s_mask
+    update_info['t_mask'] = t_mask
+    update_info['mask_align'] = mask_align
+    update_info['mask_transition'] = mask_transition
+    update_info['bs'] = bs
+    update_info['src_batch'] = src_graph.batch 
+    update_info['trg_batch'] = trg_graph.batch
+    update_info['num_classes'] = t_mask.sum(dim=1, keepdim=True)
+    return update_info
+
+def sample_discrete_feature_noise_wr(bs, lim_dist):
+    sample = lim_dist.flatten(end_dim=-2).multinomial(1).reshape(bs, -1)
+    sample = sample.long()
+    sample = F.one_hot(sample, num_classes=lim_dist.shape[-1]).float()
+    return sample
+
+# def visualize_batch(self, batch, dtn='train'):
+    #     _, _, align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, s_mask, t_mask, _, _ = self.sub_forward(batch)
+    #     poses, gts, edge_srcs, edge_trgs = self.forward_diffusion(align_matrix, mask_align, mask_transition, batch_size, batch_num_nodes, s_mask, t_mask, batch, dtn=dtn)
+    #     self.reverse_diffusion(batch, poses, gts, edge_srcs, edge_trgs, s_mask, t_mask, dtn=dtn)
+
+    
+    # def visualise_instance(self, edge_src, edge_trg, gt, name, pos=None):
+    #     graph = nx.Graph()
+    #     graph.add_edges_from(edge_src.t().detach().cpu().numpy().tolist())
+    #     init_index_target = edge_src.max() + 1
+    #     target_edges = edge_trg + init_index_target
+    #     graph.add_edges_from(target_edges.t().detach().cpu().numpy().tolist())
+    #     gt_ = gt.clone()
+    #     gt_[1] += init_index_target
+    #     gt_ = gt_.t().detach().cpu().numpy().tolist()
+    #     graph.add_edges_from(gt_)
+
+    #     gt_dict = dict()
+    #     for i in range(len(gt_)):
+    #         gt_dict[gt_[i][0]] = gt_[i][1]
+
+    #     if pos is None:
+    #         pos = nx.spring_layout(graph)
+    #         for k, v in pos.items():
+    #             if k < init_index_target:
+    #                 try:
+    #                     pos[k][0] = pos[gt_dict[k]][0] - 2
+    #                     pos[k][1] = pos[gt_dict[k]][1] + 0.05
+    #                 except:
+    #                     pos[k][0] = pos[k][0] - 2
+
+    #     plt.figure(figsize=(4, 4))
+    #     options = {"edgecolors": "tab:gray", "node_size": 80, "alpha": 0.9}
+    #     nx.draw_networkx_nodes(graph, pos, nodelist=list(range(init_index_target)), node_color="tab:red", **options)
+    #     nx.draw_networkx_nodes(graph, pos, nodelist=list(range(init_index_target, len(pos))), node_color="tab:blue", **options)
+    #     nx.draw_networkx_edges(graph, pos)
+    #     nx.draw_networkx_edges(graph, pos, edgelist=gt_, width=3, alpha=0.5, edge_color="tab:green")
+    #     plt.tight_layout()
+    #     plt.savefig(name)
+    #     plt.close()
+    #     return pos
+    
+
+    # def reverse_diffusion(self, batch, poses, gts, edge_srcs, edge_trgs, s_mask, t_mask, dtn='train'):
+    #     device = self.device
+    #     trajectory = self.sample_batch(batch, return_traj=True)
+    #     for s_int in reversed(range(0, self.T + 1)):
+    #         align = trajectory[s_int]
+    #         for i in range(len(align)): # number of data examples to be visualised
+    #             this_align = generate_y(align[i][s_mask[i]].argmax(dim=1), device)
+    #             if ((self.T - s_int) % self.step_visual == 0) or (s_int == 0):
+    #                 path_visual = 'visuals/{}/sp{}/X_pred_{}.png'.format(dtn, i, self.T - s_int)
+    #                 self.visualise_instance(edge_srcs[i], edge_trgs[i], this_align, path_visual, poses[i])
+
+
+    # def forward_diffusion(self, X0, mask_align, mask_transition, bs, batch_num_nodes, s_mask, t_mask, batch, dtn='train'):
+    #     device = self.device
+    #     gts = list()
+    #     edge_srcs = list()
+    #     edge_trgs = list()
+    #     poses = list()
+    #     for i in range(bs):
+    #         this_batch = batch[i]
+    #         edge_srcs.append(this_batch['edge_index_s'])
+    #         edge_trgs.append(this_batch['edge_index_t'])
+    #         gts.append(generate_y(this_batch.y, device))
+    #         path_visual = 'visuals/{}/sp{}/'.format(dtn, i)
+    #         if not os.path.exists(path_visual):
+    #             os.makedirs(path_visual)
+    #         poses.append(self.visualise_instance(edge_srcs[-1], edge_trgs[-1], gts[-1], '{}/X_0.png'.format(path_visual)))
+
+    #     for t_int in range(0, self.T):
+    #         noisy_sample = self.apply_noise(X0, mask_align, mask_transition, bs, s_mask, t_mask, t_int=t_int)
+    #         Xt = noisy_sample['Xt']
+    #         for i in range(bs):
+    #             this_noisy_alignment = generate_y(Xt[i][s_mask[i]].argmax(dim=1), device)
+    #             if ((t_int + 1) % self.step_visual == 0) or (t_int + 1) == self.T:
+    #                 path_visual = 'visuals/{}/sp{}/X_{}.png'.format(dtn, i, t_int + 1)
+    #                 self.visualise_instance(edge_srcs[i], edge_trgs[i], this_noisy_alignment, path_visual, poses[i])
+    #     return poses, gts, edge_srcs, edge_trgs
 

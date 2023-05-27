@@ -7,4 +7,4 @@ defaults:
 
 hydra:
     run:
-        dir: ./outputs/${model.transition}_T${model.diffusion_steps}_${model.sample_mode}_ce${model.ce_weight}_vb${model.vb_weight}/${now:%Y-%m-%d_%H-%M-%S}
+        dir: ./outputs/${model.transition}_T${model.diffusion_steps}_${model.sample_mode}_ce${model.ce_weight}_vb${model.vb_weight}_ns${model.diffusion_noise_schedule}/${now:%Y-%m-%d_%H-%M-%S}
